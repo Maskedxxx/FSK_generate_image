@@ -1,0 +1,21 @@
+# API
+fastapi==0.135.1
+uvicorn==0.42.0
+python-multipart==0.0.22
+
+# HTTP запросы к OpenRouter/OSMI
+requests==2.32.5
+
+# Обработка изображений
+Pillow==12.1.1
+
+# Валидация данных
+pydantic==2.12.5
+
+# Переменные окружения
+python-dotenv==1.1.0
+
+# Тесты (dev)
+pytest==9.0.2
+pytest-anyio==0.0.0
+httpx==0.28.1

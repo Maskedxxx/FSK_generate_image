@@ -1,0 +1,35 @@
+# Виртуальное окружение
+venv/
+
+# Результаты генерации (артефакты)
+results/
+
+# Логи
+logs/
+
+# Python кэш
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Изображения (артефакты в корне)
+*.png
+*.jpg
+*.jpeg
+*.heif
+*.heic
+*.svg
+
+# Секреты
+.env
+
+# Временные файлы
+*.tmp
+*.bak

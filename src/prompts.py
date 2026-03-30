@@ -2,104 +2,185 @@
 
 # === СЛОЙ 1: Анализ планировки ===
 
-LAYER1_SYSTEM_PROMPT = """Ты — профессиональный архитектор-аналитик и дизайнер интерьеров. Твоя задача — декомпозировать планировку квартиры на отдельные помещения.
+LAYER1_SYSTEM_PROMPT = """You are an expert architect and interior visualization specialist. You work with apartment floor plans daily — you instantly recognize every room type, understand wall structures, doorways, and how rooms connect to each other.
 
-Ты получаешь изображение архитектурной схемы квартиры (вид сверху). На схеме каждое помещение обозначено цифрой метража. Некоторые помещения имеют текстовую подпись (название), некоторые — только цифру площади.
+When you see a floor plan, you read it like a book: walls are thick dark lines, doorways are arc gaps, windows are parallel lines on external walls, and each area number marks one distinct room.
 
-ТВОЯ ЗАДАЧА:
-- Найти ВСЕ помещения на схеме. ПРАВИЛО: одна цифра метража на схеме = СТРОГО одно помещение. Каждый метраж принадлежит ровно одному помещению. Bounding box должен содержать ТОЛЬКО это помещение и его метраж, НЕ захватывая соседние помещения или их метражи.
-- Для каждого помещения прочитать ТОЧНЫЕ данные с картинки
-- НЕ выдумывать цифры и названия — только то что написано на схеме
-- Правильно определить геометрическую форму каждого помещения
-- Для каждого помещения определить координаты bounding box в нормализованном формате box_2d: [y_min, x_min, y_max, x_max] где значения от 0 до 1000 (0 = верхний/левый край, 1000 = нижний/правый край). Bounding box должен ТОЧНО обрамлять стены данного помещения, не выходя за них в соседние комнаты.
+Each room on the plan has an AREA NUMBER (like 14.05 m², 3.54 m²). Every unique area number = one separate room.
 
-ФОРМАТ ОТВЕТА: строго JSON, без markdown-обёртки, без ```json```"""
+For each room, return POLYGON coordinates — a list of [x, y] points that precisely trace the INNER wall boundaries of that room.
 
-LAYER1_ANALYSIS_PROMPT = """Проанализируй планировку квартиры.
+Rules:
+- Coordinates normalized 0-1000 (0 = left/top, 1000 = right/bottom of image)
+- Every room has an ENTRANCE — a gap/break in its walls. Use this entrance as your ANCHOR: start tracing the polygon from the LEFT side of the entrance gap, then go CLOCKWISE along the inner walls back to the RIGHT side of the entrance.
+- Trace walls PRECISELY — follow every corner, niche, angle
+- For L-shaped or irregular rooms: use MORE points to trace the exact shape (6-10+ points)
+- For rectangular rooms: 4 points (corners)
+- Points go CLOCKWISE starting from entrance
+- Each area number on the plan = one separate room. Do NOT merge rooms.
+- The info block with total area (like "C 14.05 / 20.40 / 22.68") is NOT a room — it's apartment metadata, skip it
+- Identify rooms and do NOT cut the polygon too early — if you see these artifacts, the room CONTINUES:
+  * Kitchen: stove, sink, fridge, countertop — if visible, room extends to include them
+  * Bathroom: toilet, bathtub, shower — if visible, room extends to include them
+  * Bedroom: bed, nightstand — if visible, room extends to include them
+  * Hallway/closet: coat hangers, shoe rack, shelves — if visible, room extends to include them
+  * Balcony/loggia: narrow external space
+  * If room has NO recognizable artifacts — follow wall contour from entrance back to entrance
 
-Верни JSON со следующей структурой. Описание каждого поля:
+Return JSON without markdown wrapping."""
+
+LAYER1_ANALYSIS_PROMPT = """Analyze this floor plan carefully.
+
+Step 1: Count ALL unique area numbers on the plan. Each one = one room.
+Step 2: For each room, identify its function from furniture symbols.
+Step 3: Describe each wall side: TOP, LEFT, BOTTOM, RIGHT — what is there.
+Step 4: Trace the INNER walls precisely with polygon points.
+
+JSON format:
 
 {
-  "analysis": "Твои рассуждения вслух. Сначала определи СКОЛЬКО помещений на схеме — каждое место где указан метраж это отдельное помещение. Перечисли каждое: его метраж и есть ли у него текстовая подпись.",
+  "analysis": "General reasoning: how many rooms, what types",
   "rooms": [
     {
-      "name": "Текстовая подпись помещения ТОЧНО как написано на схеме. Если подписи нет — указать Nan",
-      "name_source": "label — если на схеме есть текстовая подпись. no_label — если на схеме только цифра метража без названия",
-      "area": "Цифра площади ТОЧНО как на схеме (число в м²)",
-      "shape": "Геометрическая форма помещения по контуру стен на схеме: прямоугольная / квадратная / Г-образная / П-образная / трапециевидная / нестандартная",
-      "box_2d": [y_min, x_min, y_max, x_max] — "нормализованные координаты bounding box помещения. Значения от 0 до 1000. y_min — верхний край, x_min — левый край, y_max — нижний край, x_max — правый край"
+      "name": "room function (kitchen, bedroom, bathroom, hallway, balcony) or text label from plan or Nan",
+      "name_source": "label if text label on plan, no_label if only area number",
+      "area": "area number from plan",
+      "shape": "rectangular / square / irregular",
+      "analysis": "reasoning step by step: 1) Where is the ENTRANCE? 2) What ARTIFACTS are inside? 3) Describe each wall: TOP, LEFT, BOTTOM, RIGHT. 4) Only then trace polygon.",
+      "walls": {
+        "top": "what is along the top wall",
+        "left": "what is along the left wall",
+        "bottom": "what is along the bottom wall",
+        "right": "what is along the right wall"
+      },
+      "polygon": [[x1,y1], [x2,y2], [x3,y3], ...]
     }
   ]
-}"""
+}
+
+IMPORTANT:
+- THINK before drawing: analyze wall shape first, then trace
+- L-shaped rooms need 6+ points to trace the L
+- Follow wall corners exactly
+- Do NOT include apartment info blocks as rooms"""
 
 
-# === СЛОЙ 2: Генерация визуализации комнаты ===
+# === СЛОЙ 2: Генерация визуализации комнаты (два прохода) ===
 
-# === СЛОЙ 2: Генерация визуализации комнаты ===
+# --- Проход 1: Пустая комната (только геометрия) ---
 
-# Системный промпт для генерации визуализации
-LAYER2_SYSTEM_PROMPT = """Ты — профессиональный дизайнер интерьеров. На вход получаешь вырезанную схему одного помещения из планировки квартиры (вид сверху) и предпочтения клиента.
+LAYER2_PASS1_SYSTEM = """You receive a cropped floor plan of a single room. The room is shown clearly in the CENTER with full contrast. The surrounding area is faded/semi-transparent — it shows neighboring rooms for context only (door/window positions).
 
-Твоя задача — сгенерировать фотореалистичное изображение интерьера этого помещения.
+Generate ONLY the room in the clear/bright area. The faded area is NOT part of this room.
 
-Правила:
-- Строго соответствовать ГЕОМЕТРИИ помещения со схемы (форма стен, пропорции)
-- Ракурс: ВИД СВЕРХУ (bird's eye view), камера строго над комнатой смотрит вниз — как на схеме но с реалистичной мебелью и отделкой
-- Только основная мебель, минимализм, чистые поверхности
-- Все двери закрыты, соседние помещения не видны
-- Фотореализм, как профессиональное фото для журнала дизайна
-- Без текста, надписей, водяных знаков на изображении"""
+Your task — generate a photorealistic EMPTY room that matches ONLY what is inside the red rectangle. Top-down view, camera directly above.
+
+Rules:
+- Generate ONLY the room in the clear/bright area. Nothing from the faded zone.
+- ONLY walls, floor, ceiling. NO furniture, NO appliances, NO decor.
+- Room shape and proportions STRICTLY match the bright area on the plan.
+- Strict orthographic projection — no perspective distortion.
+- Doorways (arc gaps in the bright area) — render as CLOSED doors flush with walls.
+- Floor: light hardwood. Walls: white/light. Ceiling: white.
+- Photorealism, professional quality.
+- No text, labels, or watermarks in the output."""
+
+LAYER2_PASS1_USER = """Room: {room_name}, area {room_area} sq.m, dimensions ~{room_width}m × {room_height}m, shape: {room_shape}.
+
+Generate EMPTY room — only walls, floor, ceiling. NO furniture."""
+
+# --- Проход 2: Наполнение мебелью ---
+
+LAYER2_PASS2_SYSTEM = """You receive TWO images:
+1. An EMPTY room (photorealistic, top-down view) — this is the GEOMETRY REFERENCE. Preserve walls, shape, proportions EXACTLY.
+2. A floor plan (schematic, with red rectangle) showing furniture layout — this shows WHERE to place each piece of furniture.
+
+Your task — take the empty room geometry and ADD ONLY furniture from the floor plan, styled per client preferences.
+
+Rules:
+- KEEP the empty room geometry EXACTLY as is — walls, shape, proportions unchanged.
+- ADD furniture EXACTLY as positioned on the floor plan. Logically understand what each symbol represents.
+- DOORS on the floor plan are shown as arc gaps (passages) in the walls. Keep them CLOSED as in the empty room.
+- WINDOWS on the floor plan are shown as wavy lines (curtain symbol) on the wall. Render as windows with curtains.
+- Client preferences define STYLE, COLORS, MATERIALS of furniture — NOT its placement.
+- Where the floor plan has NO furniture — leave it EMPTY. No extra items.
+- Top-down view, same camera angle as the empty room.
+- Minimalism, clean surfaces, no extra decor.
+- Photorealism, professional interior magazine quality.
+- No text, labels, or watermarks."""
+
+# Старый промпт для однопроходного режима (если понадобится)
+LAYER2_SYSTEM_PROMPT = """You are a professional interior designer. You receive a cropped floor plan of a single room (top-down view, THIS IS THE REFERENCE!) and client preferences.
+
+Your task — generate a photorealistic interior image of this room.
+
+Rules:
+- FIRST PRIORITY: follow the artifacts on the floor plan — furniture, appliances, fixtures. Place them EXACTLY as shown on the plan. Logically understand what is depicted and generate only semantically relevant artifacts for this room type.
+- Client preferences are OVERLAID on top of the plan artifacts: style, colors, materials — this is the interior styling layer over the layout.
+- Where the plan is EMPTY — leave it empty! Do not fill free space with extra furniture or decor.
+- PRESERVE the room GEOMETRY and furniture PROPORTIONS from the plan — do not distort sizes or shapes.
+- Camera: TOP-DOWN VIEW (bird's eye view), camera directly above the room looking straight down.
+- Minimalism, clean surfaces, no extra decor.
+- Doorways on the plan are shown as gaps in the perimeter with an arc (like letter "D"). In the generated image all doors must be FULLY CLOSED — appear as solid wall with door panel matching wall color, no visible gaps, no views into other rooms.
+- Photorealism, professional interior magazine photography quality.
+- No text, labels, or watermarks on the image."""
 
 # Юзер-промпт — метаданные комнаты + данные из опросника
-LAYER2_USER_TEMPLATE = """Помещение: {room_name}, площадь {room_area} м², размеры ~{room_width} м × {room_height} м, форма: {room_shape}.
+LAYER2_USER_TEMPLATE = """Room: {room_name}, area {room_area} sq.m, dimensions ~{room_width}m × {room_height}m, shape: {room_shape}.
 
-СТРОГО придерживайся этих размеров и пропорций!
+STRICTLY follow these dimensions and proportions!
 
-Предпочтения клиента:
+Client preferences:
 {preferences_block}"""
 
 
 # === СЛОЙ 3: Конвертация ракурса (сверху → уровень глаз) ===
 
-LAYER3_SYSTEM_PROMPT_TEMPLATE = """На изображении — референс интерьера комнаты (вид сверху). Это ЭТАЛОН стиля, мебели, цветов и расположения.
+LAYER3_SYSTEM_PROMPT = """На изображении — часть интерьера комнаты (вид сверху), одна стена с мебелью вдоль неё. A — левый край, B — правый край.
 
-Сторона для генерации: {side_name}
-
-Твоя задача:
-1. Посмотри ТОЛЬКО на {side_name} часть референса
-2. ИГНОРИРУЙ остальные части референса
-3. Эту сторону нужно показать ГОРИЗОНТАЛЬНО — как будто ты стоишь у ПРОТИВОПОЛОЖНОЙ стены и фотографируешь указанную сторону прямо перед собой
+Сгенерируй ГОРИЗОНТАЛЬНОЕ ПРИЗЕМЛЕННОЕ фото этой стены A B на уровне глаз — как будто ты стоишь напротив и фотографируешь её.
 
 Правила:
-- ВСЯ указанная сторона референса должна ПОЛНОСТЬЮ поместиться в горизонтальный кадр — от левого до правого края этой стороны
-- Сохрани ВСЮ мебель и артефакты с этой стороны строго как на референсе
-- ВАЖНО: не зеркаль, не переворачивай — что на референсе СЛЕВА на этой стороне, то и на фото должно быть СЛЕВА. Что СПРАВА — то СПРАВА
-- Не добавляй ничего с других сторон и ничего нового (SKIP OTHER),
-- Камера у противоположной стены, на уровне глаз, смотрит прямо на указанную сторону
-- Фотореализм, горизонтальный кадр
-- Без текста, надписей, водяных знаков"""
+- ВСЯ стена от A до B должна ПОЛНОСТЬЮ поместиться в кадр
+- УЧИТЫВАЙ ГЕОМЕТРИЮ комнаты и ГЕОМЕТРИЮ пропорции мебели и артефактов со схемы — не искажай размеры и форму
+- Мебель и ВСЕ артефакты строго как на референсе, без добавлений и выдумок
+- Не добавляй ничего нового — только то что видно на изображении
+- Фотореализм, горизонтальный кадр на уровне глаз
+- Без текста, надписей, водяных знаков, без букв-якорей"""
 
-# Стороны для динамической подстановки
-LAYER3_SIDES = {
-    "top": "top сторону референса — камера стоит у bottom края, смотрит вверх",
-    "bottom": "bottom сторону референса — камера стоит у top края, смотрит вниз",
-    "left": "left сторону референса — камера стоит у right края, смотрит влево",
-    "right": "right сторону референса — камера стоит у left края, смотрит вправо",
-}
+LAYER3_USER_TEMPLATE = """На этой стороне находятся следующие артефакты:
+{artifacts_block}
 
-LAYER3_USER_TEMPLATE = "Покажи горизонтально {side_description}."
+Артефакты с пометкой (partial) видны частично — они уходят за край кадра, покажи только видимую часть.
+Артефакты с пометкой (full) видны целиком — покажи их полностью.
+
+Сгенерируй горизонтальное фото этой стены со ВСЕМИ перечисленными артефактами."""
+
+LAYER3_USER_PROMPT_NO_ARTIFACTS = "Сгенерируй горизонтальное фото этой стены со всеми артефактами."
 
 
-def build_layer3_prompt(side: str = "right") -> tuple:
+def build_layer3_prompt(side: str = "right", artifacts: list = None) -> tuple:
     """
     Собирает промпты для Слоя 3.
-    side — какую сторону генерировать: top/bottom/left/right
+    Если есть артефакты из Слоя 2.5 — включает их в user prompt.
+    Артефакты могут быть строками или dict с name/visibility.
     Возвращает (system_prompt, user_prompt).
     """
-    side_name = LAYER3_SIDES.get(side, LAYER3_SIDES["right"])
-    system_prompt = LAYER3_SYSTEM_PROMPT_TEMPLATE.format(side_name=side_name)
-    user_prompt = LAYER3_USER_TEMPLATE.format(side_description=side_name)
-    return system_prompt, user_prompt
+    if artifacts:
+        lines = []
+        for a in artifacts:
+            if isinstance(a, dict):
+                name = a.get("name", str(a))
+                vis = a.get("visibility", "full")
+                lines.append(f"- {name} ({vis})")
+            else:
+                lines.append(f"- {a} (full)")
+        artifacts_block = "\n".join(lines)
+        user_prompt = LAYER3_USER_TEMPLATE.format(artifacts_block=artifacts_block)
+    else:
+        user_prompt = LAYER3_USER_PROMPT_NO_ARTIFACTS
+
+    return LAYER3_SYSTEM_PROMPT, user_prompt
 
 
 # Маппинг вопросов опросника по типам помещений
@@ -191,7 +272,8 @@ def build_layer2_prompt(room: dict, answers: dict) -> tuple:
             w, h = crop.size
             ratio = w / h
             # area = width * height, ratio = width / height
-            room_height = math.sqrt(room["area"] / ratio)
+            area_boosted = room["area"] * 1.1  # +10% к метражу
+            room_height = math.sqrt(area_boosted / ratio)
             room_width = ratio * room_height
         except Exception:
             pass
