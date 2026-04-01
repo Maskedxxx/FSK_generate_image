@@ -19,3 +19,6 @@ python-dotenv==1.1.0
 pytest==9.0.2
 pytest-anyio==0.0.0
 httpx==0.28.1
+curl -X POST http://localhost:8000/layer1/analyze -H "X-API-Key: fsk-gen-2026-a7b3c9d1e5f2" -F "image=@/Users/mask/Downloads/конеткст_для_агента/Валидные/Снимок экрана 2026-03-10 130412.jpg" -F 'answers={"style":"Скандинавский","colors":"Светлые (белый, беж, серый)","materials":["Натуральное дерево"],"residents":"2 взрослых без детей","work_from_home":"Нет, работа вне дома","hobby":"Чтение и коллекционирование (полки, библиотека, кресло)","bathroom_layout":"Совмещённый санузел","bath_type":"Душевая","storage":["Чемоданы"]}'
+
+curl -X POST http://localhost:8000/layer2/generate/2026-04-01_5b1bdd01 -H "X-API-Key: fsk-gen-2026-a7b3c9d1e5f2" -F "room_index=0"
