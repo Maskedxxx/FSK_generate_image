@@ -1,9 +1,7 @@
 """
 Слой 2: Генерация референса (вид сверху).
 
-Двухпроходная генерация через OSMI-ноды:
-    Проход 1: crop → FSK_Layer2_ImageGen → пустая комната
-    Проход 2: пустая комната + crop → FSK_Layer2_ImageGen_Dual → референс с мебелью
+Однопроходная генерация через OSMI: crop → FSK_Layer2_ImageGen → референс с мебелью.
 
 Функции:
     generate_room()         — основная: crop + опросник → PNG референс
@@ -12,12 +10,15 @@
 
 import base64
 import io
+import json
 import os
 import math
+import time
+from datetime import datetime, timezone
 from PIL import Image
 
-from ..prompts import build_layer2_prompt, LAYER2_PASS1_SYSTEM, LAYER2_PASS1_USER, LAYER2_PASS2_SYSTEM
-from ..osmi_client import call_osmi_image, call_osmi_image_dual
+from ..prompts import build_layer2_prompt, LAYER2_SYSTEM_PROMPT
+from ..osmi_client import call_osmi_image
 from ..logger import get_logger
 
 log = get_logger("fsk.layer2")
@@ -29,7 +30,7 @@ MIN_LONG_SIDE = 1024
 def generate_room(room: dict, answers: dict, crop_path: str, output_path: str) -> str:
     """
     Генерирует фотореалистичный референс комнаты (вид сверху).
-    Двухпроходная генерация через OSMI-ноды.
+    Однопроходная генерация: crop → OSMI → референс сразу с мебелью.
 
     Принимает:
         room — метаданные комнаты из Слоя 1 {name, area, shape, crop_path}
@@ -37,16 +38,11 @@ def generate_room(room: dict, answers: dict, crop_path: str, output_path: str) -
         crop_path — путь к вырезанному изображению помещения
         output_path — путь для сохранения PNG
 
-    Выполняет:
-        Проход 1: crop → OSMI (1 изображение) → пустая комната
-        Проход 2: пустая комната + crop → OSMI (2 изображения) → референс с мебелью
-
     Возвращает:
         путь к сохранённому изображению
     """
     room_name = room.get("name", "unknown")
 
-    # Проверяем что crop существует
     if not os.path.exists(crop_path):
         raise FileNotFoundError(f"Crop файл не найден: {crop_path}")
 
@@ -55,49 +51,33 @@ def generate_room(room: dict, answers: dict, crop_path: str, output_path: str) -
     # Масштабируем crop
     crop_base64 = _upscale_and_encode(crop_path, room_name)
 
-    # Расчёт размеров для промпта
-    room_width, room_height = 0.0, 0.0
-    try:
-        img = Image.open(crop_path)
-        w, h = img.size
-        ratio = w / h
-        area_boosted = room.get("area", 10) * 1.1
-        room_height = math.sqrt(area_boosted / ratio)
-        room_width = ratio * room_height
-    except Exception:
-        pass
+    # Собираем промпт с опросником
+    _, user_prompt = build_layer2_prompt(room, answers)
+    prompt = f"{LAYER2_SYSTEM_PROMPT}\n\n{user_prompt}"
 
-    # === ПРОХОД 1: Пустая комната ===
-    log.info(f"[{room_name}] Проход 1: пустая комната...")
-    pass1_user = LAYER2_PASS1_USER.format(
-        room_name=room_name,
-        room_area=room.get("area", 0),
-        room_width=f"{room_width:.1f}",
-        room_height=f"{room_height:.1f}",
-        room_shape=room.get("shape", "прямоугольная"),
-    )
-    # Через OSMI-ноду FSK_Layer2_ImageGen (1 изображение)
-    pass1_prompt = f"{LAYER2_PASS1_SYSTEM}\n\n{pass1_user}"
-    empty_room_b64 = call_osmi_image(pass1_prompt, crop_base64, f"{room_name}/pass1")
+    # Отправляем в OSMI
+    t_start = time.monotonic()
+    reference_b64 = call_osmi_image(prompt, crop_base64, f"{room_name}/generate")
+    osmi_sec = round(time.monotonic() - t_start, 2)
 
-    # Сохраняем пустую комнату как промежуточный артефакт
+    # Сохраняем референс
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    empty_path = output_path.replace(".png", "_empty.png")
-    with open(empty_path, "wb") as f:
-        f.write(base64.b64decode(empty_room_b64))
-    log.info(f"[{room_name}] Проход 1 готов: {empty_path}")
-
-    # === ПРОХОД 2: Наполнение мебелью ===
-    log.info(f"[{room_name}] Проход 2: наполнение мебелью...")
-    # Через OSMI-ноду FSK_Layer2_ImageGen_Dual (2 изображения)
-    _, pass2_user = build_layer2_prompt(room, answers)
-    pass2_prompt = f"{LAYER2_PASS2_SYSTEM}\n\n{pass2_user}"
-    reference_b64 = call_osmi_image_dual(pass2_prompt, empty_room_b64, crop_base64, f"{room_name}/pass2")
-
-    # Сохраняем финальный референс
     img_bytes = base64.b64decode(reference_b64)
     with open(output_path, "wb") as f:
         f.write(img_bytes)
+
+    # Сохраняем мету
+    meta = {
+        "layer": 2,
+        "room": room_name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "prompt": prompt,
+        "timing": {"osmi_call_sec": osmi_sec},
+        "output_kb": len(img_bytes) // 1024,
+    }
+    meta_path = output_path.replace(".png", "_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
 
     log.info(f"[{room_name}] Референс сохранён: {output_path} ({len(img_bytes) // 1024} KB)")
     return output_path

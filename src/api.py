@@ -2,21 +2,19 @@
 API — точка входа пайплайна генерации визуализаций интерьера.
 
 Структура хранения:
-    results/{task_id}/
+    results/{date}_{id}/
         meta.json               — IP, UA, timestamp, answers
         input.jpg               — загруженная схема
-        analysis.json           — результат Слоя 1
-        crops/                  — вырезанные помещения
-        references/             — референсы (вид сверху)
-        artifacts.json          — артефакты по сторонам
-        renders/                — горизонтальные фото
+        L1_crops/               — апскейл схемы + кропы + analysis.json + L1_meta.json
+        L2_references/          — референсы сверху с мебелью + мета
+        L3_renders/             — фото с двух сторон + подготовленные референсы + мета
+        L4_composite/           — общий рендер квартиры + коллаж + мета
 
 Поток:
-    POST /layer1/analyze            — загрузка схемы + опросник → task_id (всё сохраняется)
-    POST /layer2/generate/{task_id} — генерация референса комнаты (по индексу из task)
-    POST /layer25/describe/{task_id} — описание артефактов (по индексу из task)
-    POST /layer3/render/{task_id}   — горизонтальное фото (по индексу + сторона из task)
-    POST /generate                  — полный пайплайн (всё за один вызов)
+    POST /layer1/analyze            — загрузка схемы + опросник → task_id
+    POST /layer2/generate/{task_id} — генерация референса (1 проход)
+    POST /layer3/render/{task_id}   — рендер с двух сторон (side_a + side_b)
+    POST /generate                  — полный пайплайн (L1 → L2 → L3 → L4)
     GET  /status/{task_id}          — статус задачи
     GET  /result/{task_id}          — результаты
 
@@ -36,8 +34,7 @@ from .questionnaire import QUESTIONS, validate_answers
 from .pipeline import run_pipeline
 from .layers.layer1_analyze import analyze_floorplan
 from .layers.layer2_generate import generate_room
-from .layers.layer25_describe import describe_all_sides
-from .layers.layer3_render import render_side
+from .layers.layer3_render import render_angles
 from .logger import get_logger
 from .config import FSK_API_KEY
 
@@ -48,13 +45,12 @@ app = FastAPI(
 Сервис генерации визуализаций интерьера по архитектурной планировке квартиры.
 
 **Поток работы:**
-1. `POST /layer1/analyze` — загрузить схему + опросник → получить task_id и список комнат с crop'ами
-2. `POST /layer2/generate/{task_id}` — по индексу комнаты → получить референс (вид сверху)
-3. `POST /layer25/describe/{task_id}` — по индексу комнаты → получить артефакты по 4 сторонам
-4. `POST /layer3/render/{task_id}` — по индексу + стороне → получить горизонтальное фото стены
+1. `POST /layer1/analyze` — загрузить схему + опросник → task_id и список комнат
+2. `POST /layer2/generate/{task_id}` — по индексу комнаты → референс сверху с мебелью
+3. `POST /layer3/render/{task_id}` — по индексу → 2 фото (side_a + side_b)
 
 **Или одним вызовом:**
-- `POST /generate` — всё за один раз (фоновая задача), поллить `GET /status/{task_id}`
+- `POST /generate` — полный пайплайн (L1 → L2 → L3 → L4), поллить `GET /status/{task_id}`
 """,
 )
 
@@ -191,7 +187,7 @@ def get_status(task_id: str):
 def get_result(task_id: str, request: Request):
     """
     **Вход:** task_id из POST /generate.
-    **200:** `{rooms_count, rooms: [{name, area, reference, sides: {top,bottom,left,right}}]}`.
+    **200:** `{rooms_count, rooms: [{name, area, reference, renders: {side_a, side_b}}], composite}`.
     **202:** ещё обрабатывается. **500:** ошибка. **404:** task не найден.
     """
     if task_id not in tasks:
@@ -226,7 +222,7 @@ async def layer1_analyze(
 
     **Вход:** image (файл планировки) + answers (JSON опросника, сохраняется для Слоя 2).
     **Выход:** `{task_id, rooms: [{index, name, area, shape, has_crop}]}`.
-    **Далее:** использовать task_id в /layer2/generate/{task_id}, /layer25/describe, /layer3/render.
+    **Далее:** использовать task_id в /layer2/generate/{task_id}, /layer3/render/{task_id}.
     **Артефакты:** results/{task_id}/crops/ — вырезанные помещения + schema_with_polygons.png.
     """
     # Проверка API-ключа
@@ -292,12 +288,12 @@ async def layer2_generate(
     room_index: int = Form(..., description="Индекс комнаты из Слоя 1"),
 ):
     """
-    Двухпроходная генерация: пустая комната → наполнение мебелью по стилю из опросника.
+    Однопроходная генерация: кроп → референс сверху сразу с мебелью по стилю из опросника.
 
     **Условие:** сначала вызвать POST /layer1/analyze (нужен task_id с crop'ами).
     **Вход:** task_id + room_index (из списка rooms Слоя 1).
     **Выход:** `{task_id, room_index, reference: путь к PNG}`.
-    **Артефакты:** results/{task_id}/references/{name}.png + {name}_empty.png (промежуточный).
+    **Артефакты:** results/{task_id}/L2_references/{name}.png + {name}_meta.json.
     """
     # Проверка API-ключа
     auth_error = _check_api_key(request)
@@ -333,73 +329,18 @@ async def layer2_generate(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.post("/layer25/describe/{task_id}", summary="Слой 2.5: Описание артефактов по 4 сторонам", tags=["Слои"])
-async def layer25_describe(
-    request: Request,
-    task_id: str,
-    room_index: int = Form(..., description="Индекс комнаты"),
-):
-    """
-    Режет референс на 4 стороны, для каждой определяет артефакты (мебель, двери, окна) с visibility full/partial.
-
-    **Условие:** сначала вызвать /layer2/generate/{task_id} (нужен референс).
-    **Вход:** task_id + room_index.
-    **Выход:** `{task_id, room_index, sides: {top: [{name, visibility}], bottom: [...], left: [...], right: [...]}}`.
-    **Артефакты:** results/{task_id}/artifacts/{name}.json.
-    """
-    auth_error = _check_api_key(request)
-    if auth_error:
-        return auth_error
-
-    task_dir, analysis, answers, error = _load_task(task_id)
-    if error:
-        return error
-
-    room, error = _get_room(analysis, room_index, task_id)
-    if error:
-        return error
-
-    room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
-    safe_name = room_name.replace(" ", "_").replace("/", "-")
-
-    # Ищем референс
-    ref_path = os.path.join(task_dir, "references", f"{safe_name}.png")
-    if not os.path.exists(ref_path):
-        return JSONResponse(status_code=400, content={
-            "error": f"Референс не найден. Сначала вызовите /layer2/generate/{task_id}"
-        })
-
-    log.info(f"[{task_id}] Layer2.5 | комната {room_index}: {room_name}")
-
-    try:
-        artifacts_dir = os.path.join(task_dir, "L25_artifacts", safe_name)
-        result = describe_all_sides(ref_path, room, artifacts_dir)
-
-        # Сохраняем артефакты
-        _save_json(os.path.join(task_dir, "L25_artifacts", f"{safe_name}.json"), result)
-
-        return {"status": "ok", "task_id": task_id, "room_index": room_index, "sides": result}
-
-    except Exception as e:
-        log.error(f"[{task_id}] Layer2.5 ошибка: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.post("/layer3/render/{task_id}", summary="Слой 3: Горизонтальное фото стены", tags=["Слои"])
+@app.post("/layer3/render/{task_id}", summary="Слой 3: Рендер комнаты с двух сторон", tags=["Слои"])
 async def layer3_render(
     request: Request,
     task_id: str,
     room_index: int = Form(..., description="Индекс комнаты"),
-    side: str = Form(default="top", description="Сторона: top/bottom/left/right"),
 ):
     """
-    Генерирует горизонтальное фото одной стены на уровне глаз по референсу + артефактам.
+    Генерирует 2 фото комнаты на уровне глаз: side_a (ближняя→дальняя) и side_b (дальняя→ближняя).
 
-    **Условие:** сначала /layer2/generate (референс), опционально /layer25/describe (артефакты).
-    **Вход:** task_id + room_index + side (top/bottom/left/right).
-    **Выход:** `{task_id, room_index, side, image: путь к PNG}`.
-    **Артефакты:** results/{task_id}/renders/{name}_{side}.png.
-    **Без артефактов:** если /layer25 не вызывался — генерация без списка артефактов (менее точная).
+    **Условие:** сначала /layer2/generate (референс).
+    **Вход:** task_id + room_index.
+    **Выход:** `{task_id, room_index, side_a: URL, side_b: URL}`.
     """
     auth_error = _check_api_key(request)
     if auth_error:
@@ -416,31 +357,27 @@ async def layer3_render(
     room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
     safe_name = room_name.replace(" ", "_").replace("/", "-")
 
-    # Ищем референс
-    ref_path = os.path.join(task_dir, "references", f"{safe_name}.png")
+    ref_path = os.path.join(task_dir, "L2_references", f"{safe_name}.png")
     if not os.path.exists(ref_path):
         return JSONResponse(status_code=400, content={
             "error": f"Референс не найден. Сначала вызовите /layer2/generate/{task_id}"
         })
 
-    # Ищем артефакты (опционально)
-    artifacts = []
-    artifacts_path = os.path.join(task_dir, "L25_artifacts", f"{safe_name}.json")
-    if os.path.exists(artifacts_path):
-        with open(artifacts_path, "r", encoding="utf-8") as f:
-            all_artifacts = json.load(f)
-        artifacts = all_artifacts.get(side, [])
-
-    log.info(f"[{task_id}] Layer3 | {room_name} → {side} | артефактов: {len(artifacts)}")
+    log.info(f"[{task_id}] Layer3 | {room_name} | 2 стороны")
 
     try:
         renders_dir = os.path.join(task_dir, "L3_renders")
-        os.makedirs(renders_dir, exist_ok=True)
-        output_path = os.path.join(renders_dir, f"{safe_name}_{side}.png")
+        room_analysis = room.get("analysis", "")
 
-        render_side(ref_path, output_path, side, artifacts)
+        result = render_angles(ref_path, renders_dir, room_name, room_analysis)
 
-        return {"status": "ok", "task_id": task_id, "room_index": room_index, "side": side, "image": _path_to_url(output_path, request)}
+        return {
+            "status": "ok",
+            "task_id": task_id,
+            "room_index": room_index,
+            "side_a": _path_to_url(result["side_a"], request),
+            "side_b": _path_to_url(result["side_b"], request),
+        }
 
     except Exception as e:
         log.error(f"[{task_id}] Layer3 ошибка: {e}")

@@ -2,21 +2,20 @@
 Оркестратор пайплайна генерации визуализаций.
 
 Связывает все слои в единый процесс:
-    Слой 1   → анализ планировки → JSON + crop'ы
-    Слой 2   → генерация референса (двухпроходная: пустая комната → мебель)
-    Слой 2.5 → описание артефактов по сторонам каждого референса
-    Слой 3   → горизонтальные фото 4 сторон каждой комнаты
+    Слой 1 → анализ планировки → JSON + crop'ы
+    Слой 2 → генерация референса сверху с мебелью (1 проход)
+    Слой 3 → рендер из 2 угловых ракурсов (30° и 222°)
+    Слой 4 → общий рендер всей квартиры сверху
 
 Структура результатов в output_dir (= results/{task_id}/):
-    analysis.json           — результат Слоя 1
-    L1_crops/               — вырезанные помещения (Слой 1)
-    L2_references/          — референсы (вид сверху) + _empty промежуточные (Слой 2)
-    L25_artifacts/          — JSON артефактов по сторонам (Слой 2.5)
-    L3_renders/             — горизонтальные фото (Слой 3)
+    L1_crops/               — анализ + кропы помещений (Слой 1)
+    L2_references/          — референсы вид сверху (Слой 2)
+    L3_renders/             — фото из угловых ракурсов (Слой 3)
+    L4_composite/           — общий рендер квартиры (Слой 4)
 
 Функции:
     run_pipeline()       — полный пайплайн от схемы до результатов
-    process_room()       — обработка одной комнаты (Слой 2 → 2.5 → 3)
+    process_room()       — обработка одной комнаты (Слой 2 → 3)
 
 Вызывается из:
     - src/api.py (фоновая задача через /generate)
@@ -28,8 +27,8 @@ from typing import Callable
 
 from .layers.layer1_analyze import analyze_floorplan
 from .layers.layer2_generate import generate_room
-from .layers.layer25_describe import describe_all_sides
-from .layers.layer3_render import render_side
+from .layers.layer3_render import render_angles
+from .layers.layer4_composite import render_composite
 from .logger import get_logger
 
 log = get_logger("fsk.pipeline")
@@ -55,7 +54,7 @@ def run_pipeline(
         2. Для каждой комнаты: process_room()
 
     Возвращает:
-        dict {rooms_count, rooms: [{name, area, shape, reference, sides}]}
+        dict {rooms_count, rooms: [...], composite: path}
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -75,18 +74,17 @@ def run_pipeline(
     rooms_count = len(analysis["rooms"])
     progress(f"Слой 1 готов: {rooms_count} помещений")
 
-    # === Обработка каждой комнаты ===
+    # === Обработка каждой комнаты (Слой 2 → 3) ===
     rooms_result = []
+    reference_paths = []
 
     for i, room in enumerate(analysis["rooms"]):
         room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
 
-        # Проверяем что crop есть
         if "crop_path" not in room:
             log.warning(f"[{room_name}] Нет crop — пропускаем")
             continue
 
-        # Обрабатываем комнату (Слой 2 → 2.5 → 3)
         room_result = process_room(
             room=room,
             answers=answers,
@@ -96,12 +94,26 @@ def run_pipeline(
             on_progress=on_progress,
         )
         rooms_result.append(room_result)
+        reference_paths.append(room_result["reference"])
+
+    # === Слой 4: общий рендер квартиры ===
+    composite_path = None
+    if reference_paths:
+        progress("Слой 4: общий рендер квартиры...")
+        schema_path = os.path.join(crops_dir, "schema_x2.png")
+        composite_dir = os.path.join(output_dir, "L4_composite")
+        try:
+            composite_path = render_composite(schema_path, reference_paths, composite_dir)
+            progress("Слой 4 готов")
+        except Exception as e:
+            log.error(f"Слой 4 ОШИБКА: {e}")
 
     progress(f"Готово: {len(rooms_result)} комнат обработано")
 
     return {
         "rooms_count": len(rooms_result),
         "rooms": rooms_result,
+        "composite": composite_path,
     }
 
 
@@ -114,7 +126,7 @@ def process_room(
     on_progress: Callable[[str], None] = None,
 ) -> dict:
     """
-    Обработка одной комнаты: Слой 2 → Слой 2.5 → Слой 3.
+    Обработка одной комнаты: Слой 2 → Слой 3.
 
     Принимает:
         room — метаданные комнаты из Слоя 1 {name, area, shape, crop_path}
@@ -125,12 +137,11 @@ def process_room(
         on_progress — колбэк для обновления прогресса
 
     Выполняет:
-        Слой 2: crop → references/{name}.png (+ _empty.png промежуточный)
-        Слой 2.5: references → artifacts/{name}.json
-        Слой 3: references → renders/{name}_{side}.png
+        Слой 2: crop → L2_references/{name}.png
+        Слой 3: референс → L3_renders/{name}_angle30.png, {name}_angle222.png
 
     Возвращает:
-        dict {name, area, shape, reference, sides: {top, bottom, left, right}}
+        dict {name, area, shape, reference, angles: {30: path, 222: path}}
     """
     room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
     safe_name = room_name.replace(" ", "_").replace("/", "-")
@@ -141,7 +152,7 @@ def process_room(
         if on_progress:
             on_progress(msg)
 
-    # === Слой 2: генерация референса (двухпроходная) ===
+    # === Слой 2: генерация референса (1 проход) ===
     progress(f"Слой 2: генерация {room_name} {counter}...")
     refs_dir = os.path.join(output_dir, "L2_references")
     os.makedirs(refs_dir, exist_ok=True)
@@ -150,39 +161,24 @@ def process_room(
     generate_room(room, answers, room["crop_path"], ref_path)
     log.info(f"[{room_name}] Слой 2: референс → {ref_path}")
 
-    # === Слой 2.5: описание артефактов по сторонам ===
-    progress(f"Слой 2.5: артефакты {room_name} {counter}...")
-    artifacts_dir = os.path.join(output_dir, "L25_artifacts", safe_name)
-    sides_artifacts = describe_all_sides(ref_path, room, artifacts_dir)
-
-    # Сохраняем артефакты
-    _save_json(os.path.join(output_dir, "L25_artifacts", f"{safe_name}.json"), sides_artifacts)
-    log.info(f"[{room_name}] Слой 2.5: артефакты описаны")
-
-    # === Слой 3: горизонтальные фото для каждой стороны ===
-    sides_result = {}
+    # === Слой 3: рендер из 2 угловых ракурсов ===
+    progress(f"Слой 3: рендер углов {room_name} {counter}...")
     renders_dir = os.path.join(output_dir, "L3_renders")
-    os.makedirs(renders_dir, exist_ok=True)
+    room_analysis = room.get("analysis", "")
 
-    for side in ["top", "bottom", "left", "right"]:
-        progress(f"Слой 3: {room_name} → {side} {counter}...")
-        side_path = os.path.join(renders_dir, f"{safe_name}_{side}.png")
-        artifacts = sides_artifacts.get(side, [])
-
-        try:
-            render_side(ref_path, side_path, side, artifacts)
-            sides_result[side] = side_path
-            log.info(f"[{room_name}] Слой 3: {side} готов")
-        except Exception as e:
-            sides_result[side] = f"error: {str(e)}"
-            log.error(f"[{room_name}] Слой 3: {side} ОШИБКА — {e}")
+    render_result = {}
+    try:
+        render_result = render_angles(ref_path, renders_dir, room_name, room_analysis)
+        log.info(f"[{room_name}] Слой 3: 2 ракурса готово")
+    except Exception as e:
+        log.error(f"[{room_name}] Слой 3 ОШИБКА: {e}")
 
     return {
         "name": room_name,
         "area": room["area"],
         "shape": room["shape"],
         "reference": ref_path,
-        "sides": sides_result,
+        "renders": render_result,
     }
 
 

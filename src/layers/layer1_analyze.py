@@ -31,6 +31,12 @@ log = get_logger("fsk.layer1")
 MIN_CROP_SIZE_PX = 10  # минимальный размер crop'а в пикселях
 ZOOM_FACTOR = 4  # увеличение схемы
 MAX_SIDE_PX = 4000  # потолок по длинной стороне после зума
+CROP_ZOOM = 2  # апскейл каждого кропа
+CROP_BLUR_RADIUS = 2  # блюр за полигоном
+CROP_CONTRAST = 2.5  # контраст внутри полигона
+CROP_BORDER_WIDTH = 4  # толщина зелёной рамки
+CROP_BORDER_EXPAND = 10  # расширение рамки от полигона (px)
+CROP_PADDING_PCT = 0.15  # расширение зоны видимости
 
 
 def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
@@ -78,9 +84,12 @@ def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
     img_base64 = _encode_image(image_path)
     log.info(f"Изображение закодировано: {len(img_base64) // 1024} KB base64")
 
+    # Собираем промпт
+    full_prompt = f"{LAYER1_SYSTEM_PROMPT}\n\n{LAYER1_ANALYSIS_PROMPT}"
+
     # Отправляем в API (с retry)
     t_osmi = time.monotonic()
-    raw_response = _call_api(img_base64)
+    raw_response = call_osmi_text(full_prompt, img_base64, context="layer1")
     osmi_sec = round(time.monotonic() - t_osmi, 2)
     log.info(f"Ответ от модели: {len(raw_response)} символов ({osmi_sec} сек)")
 
@@ -136,6 +145,7 @@ def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
             "crop_sec": crop_sec,
             "total_sec": total_sec,
         },
+        "prompt": full_prompt,
     }
 
     if output_dir:
@@ -196,21 +206,6 @@ def _encode_image(image_path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def _call_api(img_base64: str) -> str:
-    """
-    Вызов текстовой OSMI-ноды (FSK_Layer1_TextAnalysis).
-    Retry логика внутри osmi_client.
-
-    Принимает:
-        img_base64 — изображение в base64
-
-    Возвращает:
-        текст ответа модели
-    """
-    # Собираем промпт: system + user
-    prompt = f"{LAYER1_SYSTEM_PROMPT}\n\n{LAYER1_ANALYSIS_PROMPT}"
-    return call_osmi_text(prompt, img_base64, context="layer1")
-
 
 def _parse_response(text: str) -> dict:
     """
@@ -266,8 +261,8 @@ def _validate_response(data: dict) -> FloorplanResult:
 
 def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
     """
-    Вырезает каждую комнату по полигону с полупрозрачным оверлеем за границами.
-    Усиливает контраст стен. Расширяет полигон на 7px для захвата стен.
+    Вырезает каждую комнату по полигону.
+    Блюр за полигоном, контраст внутри, зелёная рамка, апскейл кропа.
 
     Принимает:
         image_path — путь к исходному изображению
@@ -277,16 +272,12 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
     Возвращает:
         analysis с добавленными crop_path для каждой комнаты
     """
-    from PIL import ImageDraw, ImageEnhance
+    from PIL import ImageDraw, ImageEnhance, ImageFilter
 
     img = Image.open(image_path)
     img_w, img_h = img.size
     os.makedirs(output_dir, exist_ok=True)
     log.info(f"Исходное изображение: {img_w}x{img_h} px")
-
-    # Усиливаем контраст и яркость для чётких линий
-    img_enhanced = ImageEnhance.Contrast(img).enhance(2.5)
-    img_enhanced = ImageEnhance.Sharpness(img_enhanced).enhance(2.0)
 
     # Рисуем общую визуализацию полигонов на схеме
     _save_polygons_overlay(img, analysis, output_dir, img_w, img_h)
@@ -304,11 +295,7 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
             continue
 
         # Конвертируем нормализованные координаты в пиксели
-        px_points = []
-        for x, y in polygon:
-            px_x = int(x / 1000 * img_w)
-            px_y = int(y / 1000 * img_h)
-            px_points.append((px_x, px_y))
+        px_points = [(int(x / 1000 * img_w), int(y / 1000 * img_h)) for x, y in polygon]
 
         # Проверяем минимальный размер
         xs = [p[0] for p in px_points]
@@ -320,22 +307,9 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
             skipped.append({"name": room_label, "reason": f"полигон {poly_w}x{poly_h} px"})
             continue
 
-        # Расширяем полигон на 10px чтобы стены гарантированно внутри
-        cx = sum(p[0] for p in px_points) / len(px_points)
-        cy = sum(p[1] for p in px_points) / len(px_points)
-        expanded_points = []
-        for px, py in px_points:
-            dx = px - cx
-            dy = py - cy
-            dist = (dx**2 + dy**2) ** 0.5
-            if dist > 0:
-                expanded_points.append((int(px + dx / dist * 10), int(py + dy / dist * 10)))
-            else:
-                expanded_points.append((px, py))
-
-        # Bbox с 10% padding для контекста соседей
-        pad_x = int(poly_w * 0.10)
-        pad_y = int(poly_h * 0.10)
+        # Bbox с padding для контекста соседей
+        pad_x = int(poly_w * CROP_PADDING_PCT)
+        pad_y = int(poly_h * CROP_PADDING_PCT)
         bbox = (
             max(0, min(xs) - pad_x),
             max(0, min(ys) - pad_y),
@@ -343,28 +317,52 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
             min(img_h, max(ys) + pad_y),
         )
 
-        # Вырезаем область с контекстом (усиленный контраст)
-        room_crop = img_enhanced.crop(bbox)
+        # Вырезаем расширенную область
+        crop = img.crop(bbox)
 
-        # Полупрозрачный белый оверлей за полигоном (70%)
-        overlay = Image.new("RGBA", room_crop.size, (255, 255, 255, 180))
-        mask = Image.new("L", (img_w, img_h), 255)
-        mask_draw = ImageDraw.Draw(mask)
-        mask_draw.polygon(expanded_points, fill=0)  # внутри расширенного полигона — без оверлея
-        mask_crop = mask.crop(bbox)
+        # Пересчитываем точки полигона относительно кропа
+        local_points = [(px - bbox[0], py - bbox[1]) for px, py in px_points]
 
-        # Накладываем оверлей
-        room_crop = room_crop.convert("RGBA")
-        room_crop.paste(overlay, mask=mask_crop)
-        room_crop = room_crop.convert("RGB")
+        # Расширяем полигон для рамки (верх/низ/лево/право)
+        min_x = min(p[0] for p in local_points)
+        max_x = max(p[0] for p in local_points)
+        min_y = min(p[1] for p in local_points)
+        max_y = max(p[1] for p in local_points)
+        expanded = []
+        for px, py in local_points:
+            ex = px - CROP_BORDER_EXPAND if px == min_x else (px + CROP_BORDER_EXPAND if px == max_x else px)
+            ey = py - CROP_BORDER_EXPAND if py == min_y else (py + CROP_BORDER_EXPAND if py == max_y else py)
+            expanded.append((ex, ey))
+
+        # Маска по расширенному полигону (внутри = 255, снаружи = 0)
+        mask = Image.new("L", crop.size, 0)
+        ImageDraw.Draw(mask).polygon(expanded, fill=255)
+
+        # Внутри — контраст + резкость, снаружи — блюр
+        crop_contrast = ImageEnhance.Contrast(crop).enhance(CROP_CONTRAST)
+        crop_contrast = ImageEnhance.Sharpness(crop_contrast).enhance(1.5)
+        crop_blurred = crop.filter(ImageFilter.GaussianBlur(radius=CROP_BLUR_RADIUS))
+
+        # Склеиваем: внутри полигона — контраст, снаружи — блюр
+        result = Image.composite(crop_contrast, crop_blurred, mask)
+
+        # Зелёная рамка по расширенному полигону
+        draw = ImageDraw.Draw(result)
+        draw.polygon(expanded, outline="lime", width=CROP_BORDER_WIDTH)
+
+        safe_name = room_label.replace(" ", "_").replace("/", "-")
+
+        # Апскейл кропа
+        new_w = result.width * CROP_ZOOM
+        new_h = result.height * CROP_ZOOM
+        result = result.resize((new_w, new_h), Image.LANCZOS)
 
         # Сохраняем
-        safe_name = room_label.replace(" ", "_").replace("/", "-")
         crop_path = os.path.join(output_dir, f"{i + 1}_{safe_name}_crop.png")
-        room_crop.save(crop_path)
+        result.save(crop_path)
 
         room["crop_path"] = crop_path
-        log.info(f"[{room_label}] Crop: {room_crop.size[0]}x{room_crop.size[1]} px → {crop_path}")
+        log.info(f"[{room_label}] Crop: {new_w}x{new_h} px (x{CROP_ZOOM}) → {crop_path}")
 
     # Добавляем инфо о пропущенных
     if skipped:

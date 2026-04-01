@@ -14,8 +14,7 @@ Rules:
 - Coordinates normalized 0-1000 (0 = left/top, 1000 = right/bottom of image)
 - Every room has an ENTRANCE — a gap/break in its walls. Use this entrance as your ANCHOR: start tracing the polygon from the LEFT side of the entrance gap, then go CLOCKWISE along the inner walls back to the RIGHT side of the entrance.
 - MAKE POLYGONS 10-20% LARGER than you think the room is. It is MUCH better to capture extra space than to cut off part of the room. When in doubt — go bigger.
-- ALWAYS prefer RECTANGULAR polygons (4 points). If the room is slightly irregular — round it to the nearest rectangle that FULLY covers the room. Better to capture a bit extra than to miss part of the room.
-- Use irregular polygons (5+ points) ONLY for rooms that are clearly and significantly non-rectangular (strong L-shape, triangle, etc.)
+- ALWAYS use RECTANGULAR polygons (4 points). Round any room to the nearest rectangle that FULLY covers it. Better to capture a bit extra than to miss part of the room.
 - Points go CLOCKWISE starting from entrance
 - Each area number on the plan = one separate room. Do NOT merge rooms.
 - The info block with total area (like "C 14.05 / 20.40 / 22.68") is NOT a room — it's apartment metadata, skip it
@@ -57,7 +56,7 @@ JSON format:
       "name_source": "label if text label on plan, no_label if only area number",
       "area": "area number from plan",
       "shape": "rectangular / square / irregular",
-      "analysis": "reasoning step by step: 1) Where is the ENTRANCE? 2) What ARTIFACTS are inside? 3) Describe each wall: TOP, LEFT, BOTTOM, RIGHT. 4) Determine shape: ALWAYS prefer rectangular/square polygon (4 points). Use irregular polygon ONLY if the room is clearly and significantly L-shaped, triangular, or trapezoid. When in doubt — use rectangle that fully covers the room. 5) Only then trace polygon.",
+      "analysis": "reasoning step by step: 1) Where is the ENTRANCE? 2) What ARTIFACTS are inside? 3) Describe each wall: TOP, LEFT, BOTTOM, RIGHT. 4) Determine shape: ALWAYS prefer rectangular/square polygon (4 points). ALWAYS use rectangle (4 points) that fully covers the room. 5) Only then trace polygon.",
       "walls": {
         "top": "what is along the top wall (REQUIRED — write 'empty' if nothing)",
         "left": "what is along the left wall (REQUIRED — write 'empty' if nothing)",
@@ -138,59 +137,57 @@ Rules:
 # Юзер-промпт — метаданные комнаты + данные из опросника
 LAYER2_USER_TEMPLATE = """Room: {room_name}, area {room_area} sq.m, dimensions ~{room_width}m × {room_height}m, shape: {room_shape}.
 
+Room analysis (from floor plan):
+{room_analysis}
+
 STRICTLY follow these dimensions and proportions!
 
 Client preferences:
 {preferences_block}"""
 
 
-# === СЛОЙ 3: Конвертация ракурса (сверху → уровень глаз) ===
+# === СЛОЙ 3: Рендер из угловых ракурсов ===
 
-LAYER3_SYSTEM_PROMPT = """На изображении — часть интерьера комнаты (вид сверху), одна стена с мебелью вдоль неё. A — левый край, B — правый край.
+LAYER3_ANGLE_PROMPT = """На изображении — часть интерьера комнаты (вид сверху). Точка съёмки рендера направление ТАК ЖЕ СВЕРХУ ВНИЗ но УГОЛ СЬЕМКИ немного ниже на 20 градусов!.
 
-Сгенерируй ГОРИЗОНТАЛЬНОЕ ПРИЗЕМЛЕННОЕ фото этой стены A B на уровне глаз — как будто ты стоишь напротив и фотографируешь её.
+Сгенерируй фото этого помещения опустив камеру немного вниз и сьемка от угла ОТ ВАС в верхний ДАЛЬНИЙ угол сторону на уровне глаз — как будто камера стоит в ближнем углу стороне и фотографируешь дальний сторону угол.
 
-Правила:
-- ВСЯ стена от A до B должна ПОЛНОСТЬЮ поместиться в кадр
-- УЧИТЫВАЙ ГЕОМЕТРИЮ комнаты и ГЕОМЕТРИЮ пропорции мебели и артефактов со схемы — не искажай размеры и форму
+Правила ОБЯЗАТЕЛЬНЫЕ К СОБЛЮДЕНИЯ РЕНДЕРА:
+- область от нижнего стороны угла до верхнего стороны угла должна поместиться в кадр
+- УЧИТЫВАЙ ГЕОМЕТРИЮ РЕФЕРЕНСА комнаты и ГЕОМЕТРИЮ пропорции И РАСПОЛОДЖЕНИИ мебели и артефактов с РЕФЕРЕНСА — не искажай размеры местоположение и форму
+- предметы мебели СТРОГО на своих местах, как на референсе со стороны ОТ БЛИЖНЕЙ ВАС СТОРОНЫ К ДАЛЬНЕЙ СТОРОНЕ ДАЛЬНЕГО от ВАС — не перемещай и не добавляй
 - Мебель и ВСЕ артефакты строго как на референсе, без добавлений и выдумок
 - Не добавляй ничего нового — только то что видно на изображении
 - Фотореализм, горизонтальный кадр на уровне глаз
 - Без текста, надписей, водяных знаков, без букв-якорей"""
 
-LAYER3_USER_TEMPLATE = """На этой стороне находятся следующие артефакты:
-{artifacts_block}
+# LAYER3_ANGLE_PROMPT = """На изображении — часть интерьера комнаты (вид сверху). Нижний угол сторона — точка съёмки, верхний угол сторона — направление взгляда.
 
-Артефакты с пометкой (partial) видны частично — они уходят за край кадра, покажи только видимую часть.
-Артефакты с пометкой (full) видны целиком — покажи их полностью.
+# Сгенерируй фото этого помещения смотря из нижнего стороны угла ОТ ВАС в верхний ДАЛЬНИЙ угол сторону на уровне глаз — как будто ты стоишь в нижнем углу стороне и фотографируешь верхний сторону угол.
 
-Сгенерируй горизонтальное фото этой стены со ВСЕМИ перечисленными артефактами."""
+# Правила ОБЯЗАТЕЛЬНЫЕ К СОБЛЮДЕНИЯ РЕНДЕРА:
+# - область от нижнего стороны угла до верхнего стороны угла должна поместиться в кадр
+# - УЧИТЫВАЙ ГЕОМЕТРИЮ РЕФЕРЕНСА комнаты и ГЕОМЕТРИЮ пропорции И РАСПОЛОДЖЕНИИ мебели и артефактов с РЕФЕРЕНСА — не искажай размеры местоположение и форму
+# - Оставляй только те предметы мебели который будут ВИДНЫ ОТ БЛИЖНЕЙ ВАС СТОРОНЫ К ДАЛЬНЕЙ СТОРОНЕ ОТ ВАС, предметы мебели СТРОГО на своих местах, как на референсе со стороны ОТ БЛИЖНЕЙ ВАС СТОРОНЫ К ДАЛЬНЕЙ СТОРОНЕ ДАЛЬНЕГО от ВАС — не перемещай и не добавляй
+# - Мебель и ВСЕ артефакты строго как на референсе, без добавлений и выдумок
+# - Не добавляй ничего нового — только то что видно на изображении
+# - Фотореализм, горизонтальный кадр на уровне глаз
+# - Без текста, надписей, водяных знаков, без букв-якорей"""
 
-LAYER3_USER_PROMPT_NO_ARTIFACTS = "Сгенерируй горизонтальное фото этой стены со всеми артефактами."
 
+# === СЛОЙ 4: Общий рендер квартиры сверху ===
 
-def build_layer3_prompt(side: str = "right", artifacts: list = None) -> tuple:
-    """
-    Собирает промпты для Слоя 3.
-    Если есть артефакты из Слоя 2.5 — включает их в user prompt.
-    Артефакты могут быть строками или dict с name/visibility.
-    Возвращает (system_prompt, user_prompt).
-    """
-    if artifacts:
-        lines = []
-        for a in artifacts:
-            if isinstance(a, dict):
-                name = a.get("name", str(a))
-                vis = a.get("visibility", "full")
-                lines.append(f"- {name} ({vis})")
-            else:
-                lines.append(f"- {a} (full)")
-        artifacts_block = "\n".join(lines)
-        user_prompt = LAYER3_USER_TEMPLATE.format(artifacts_block=artifacts_block)
-    else:
-        user_prompt = LAYER3_USER_PROMPT_NO_ARTIFACTS
+LAYER4_COMPOSITE_PROMPT = """На изображении — коллаж: слева чёрно-белая схема планировки квартиры (вид сверху), справа — фотореалистичные референсы каждой комнаты (вид сверху).
 
-    return LAYER3_SYSTEM_PROMPT, user_prompt
+Сгенерируй ЕДИНОЕ фотореалистичное изображение всей квартиры сверху, объединив все комнаты в одну планировку.
+
+Правила:
+- Расположение комнат СТРОГО как на схеме слева
+- Интерьер каждой комнаты СТРОГО как на соответствующем референсе
+- Стены между комнатами чёткие, белые
+- Вид строго сверху, ортографическая проекция
+- Фотореализм, профессиональное качество
+- Без текста, надписей, водяных знаков"""
 
 
 # Маппинг вопросов опросника по типам помещений
@@ -301,12 +298,15 @@ def build_layer2_prompt(room: dict, answers: dict) -> tuple:
 
     preferences_block = "\n".join(pref_lines) if pref_lines else "- Default modern style"
 
+    room_analysis = room.get("analysis", "No analysis available")
+
     user_prompt = LAYER2_USER_TEMPLATE.format(
         room_name=room_name,
         room_area=room["area"],
         room_width=f"{room_width:.1f}",
         room_height=f"{room_height:.1f}",
         room_shape=room["shape"],
+        room_analysis=room_analysis,
         preferences_block=preferences_block,
     )
 
