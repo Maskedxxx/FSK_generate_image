@@ -13,25 +13,24 @@
     _crop_rooms()           — вырезает комнаты по box_2d координатам
 """
 
-import requests
 import base64
 import json
 import os
 import time
+from datetime import datetime, timezone
 from PIL import Image
 
-from ..config import OPENROUTER_API_KEY, LAYER1_MODEL
 from ..prompts import LAYER1_SYSTEM_PROMPT, LAYER1_ANALYSIS_PROMPT
+from ..config import LAYER1_MODEL
 from ..models import FloorplanResult
+from ..osmi_client import call_osmi_text
 from ..logger import get_logger
 
 log = get_logger("fsk.layer1")
 
-# Настройки retry
-MAX_RETRIES = 3
-RETRY_DELAYS = [1, 2, 4]  # экспоненциальный backoff (секунды)
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 MIN_CROP_SIZE_PX = 10  # минимальный размер crop'а в пикселях
+ZOOM_FACTOR = 4  # увеличение схемы
+MAX_SIDE_PX = 4000  # потолок по длинной стороне после зума
 
 
 def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
@@ -63,14 +62,27 @@ def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
         raise FileNotFoundError(f"Файл планировки не найден: {image_path}")
 
     log.info(f"Анализ планировки: {image_path}")
+    t_start = time.monotonic()
 
-    # Кодируем изображение
+    # Создаём L1_crops если указан output_dir
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Апскейл оригинала
+    img_kb = os.path.getsize(image_path) // 1024
+    save_path = os.path.join(output_dir, "schema_x2.png") if output_dir else image_path.rsplit(".", 1)[0] + "_x2.png"
+    orig_w, orig_h, zoomed_w, zoomed_h = _upscale_schema(image_path, save_path)
+    image_path = save_path
+
+    # Кодируем апскейленное изображение
     img_base64 = _encode_image(image_path)
     log.info(f"Изображение закодировано: {len(img_base64) // 1024} KB base64")
 
     # Отправляем в API (с retry)
+    t_osmi = time.monotonic()
     raw_response = _call_api(img_base64)
-    log.info(f"Ответ от модели: {len(raw_response)} символов")
+    osmi_sec = round(time.monotonic() - t_osmi, 2)
+    log.info(f"Ответ от модели: {len(raw_response)} символов ({osmi_sec} сек)")
 
     # Парсим JSON
     parsed = _parse_response(raw_response)
@@ -84,14 +96,90 @@ def analyze_floorplan(image_path: str, output_dir: str = None) -> dict:
     result = validated.model_dump()
 
     # Вырезаем crop'ы если указана папка
+    t_crop = time.monotonic()
     if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
         result = _crop_rooms(image_path, result, output_dir)
+    crop_sec = round(time.monotonic() - t_crop, 2)
 
+    total_sec = round(time.monotonic() - t_start, 2)
+
+    # Считаем статистику
+    rooms_total = len(result.get("rooms", []))
+    rooms_with_crop = sum(1 for r in result.get("rooms", []) if "crop_path" in r)
+    rooms_skipped = rooms_total - rooms_with_crop
+
+    # Сохраняем мету
+    meta = {
+        "layer": 1,
+        "model": LAYER1_MODEL,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "input": {
+            "image_path": os.path.basename(image_path),
+            "original_size": [orig_w, orig_h],
+            "zoomed_size": [zoomed_w, zoomed_h],
+            "zoom_factor": ZOOM_FACTOR,
+            "max_side_px": MAX_SIDE_PX,
+            "image_kb": img_kb,
+        },
+        "output": {
+            "rooms_count": rooms_total,
+            "rooms_with_crop": rooms_with_crop,
+            "rooms_skipped": rooms_skipped,
+        },
+        "tokens": {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        },
+        "timing": {
+            "osmi_call_sec": osmi_sec,
+            "crop_sec": crop_sec,
+            "total_sec": total_sec,
+        },
+    }
+
+    if output_dir:
+        meta_path = os.path.join(output_dir, "L1_meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        log.info(f"Мета Слоя 1: {meta_path}")
+
+    result["_meta"] = meta
     return result
 
 
 # === ВНУТРЕННИЕ ФУНКЦИИ ===
+
+
+def _upscale_schema(image_path: str, save_path: str) -> tuple[int, int, int, int]:
+    """
+    Апскейл схемы планировки x2 с лимитом по длинной стороне.
+
+    Принимает:
+        image_path — путь к оригиналу
+        save_path — куда сохранить апскейленную версию
+
+    Возвращает:
+        (orig_w, orig_h, new_w, new_h)
+    """
+    img = Image.open(image_path)
+    orig_w, orig_h = img.size
+
+    new_w = orig_w * ZOOM_FACTOR
+    new_h = orig_h * ZOOM_FACTOR
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Ограничиваем по длинной стороне
+    max_side = max(new_w, new_h)
+    if max_side > MAX_SIDE_PX:
+        scale = MAX_SIDE_PX / max_side
+        new_w = int(new_w * scale)
+        new_h = int(new_h * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    img.save(save_path)
+    log.info(f"Апскейл схемы x{ZOOM_FACTOR}: {orig_w}x{orig_h} → {new_w}x{new_h} → {save_path}")
+    return orig_w, orig_h, new_w, new_h
 
 
 def _encode_image(image_path: str) -> str:
@@ -110,94 +198,18 @@ def _encode_image(image_path: str) -> str:
 
 def _call_api(img_base64: str) -> str:
     """
-    Вызов Gemini 3 Flash через OpenRouter с retry.
+    Вызов текстовой OSMI-ноды (FSK_Layer1_TextAnalysis).
+    Retry логика внутри osmi_client.
 
     Принимает:
         img_base64 — изображение в base64
 
-    Retry логика:
-        - До 3 попыток
-        - Задержка: 1, 2, 4 сек (exponential backoff)
-        - Retry на: 429, 5xx, timeout
-        - Без retry на: 401 (ключ невалидный)
-
     Возвращает:
         текст ответа модели
-
-    Ошибки:
-        requests.HTTPError — после исчерпания попыток
     """
-    last_error = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            log.info(f"Запрос к Gemini (попытка {attempt}/{MAX_RETRIES})")
-
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": LAYER1_MODEL,
-                    "messages": [
-                        {"role": "system", "content": LAYER1_SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": LAYER1_ANALYSIS_PROMPT},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
-                                },
-                            ],
-                        },
-                    ],
-                    "temperature": 0,
-                },
-                timeout=60,
-            )
-
-            # 401 — ключ невалидный, без retry
-            if response.status_code == 401:
-                log.error(f"API ключ невалидный (401): {response.text[:300]}")
-                response.raise_for_status()
-
-            # Retryable ошибки
-            if response.status_code in RETRYABLE_STATUS_CODES:
-                log.warning(f"API вернул {response.status_code}, retry через {RETRY_DELAYS[attempt - 1]} сек")
-                last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_DELAYS[attempt - 1])
-                continue
-
-            # Проверяем остальные ошибки
-            response.raise_for_status()
-
-            # Парсим ответ
-            data = response.json()
-            if "choices" not in data:
-                log.error(f"Ответ без choices: {json.dumps(data, ensure_ascii=False)[:500]}")
-                raise ValueError(f"API вернул ответ без choices: {json.dumps(data, ensure_ascii=False)[:300]}")
-
-            return data["choices"][0]["message"]["content"]
-
-        except requests.Timeout:
-            log.warning(f"Timeout (попытка {attempt}/{MAX_RETRIES})")
-            last_error = requests.Timeout("API timeout")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAYS[attempt - 1])
-
-        except requests.ConnectionError as e:
-            log.warning(f"Connection error (попытка {attempt}/{MAX_RETRIES}): {e}")
-            last_error = e
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAYS[attempt - 1])
-
-    # Все попытки исчерпаны
-    log.error(f"Все {MAX_RETRIES} попыток исчерпаны. Последняя ошибка: {last_error}")
-    raise last_error
+    # Собираем промпт: system + user
+    prompt = f"{LAYER1_SYSTEM_PROMPT}\n\n{LAYER1_ANALYSIS_PROMPT}"
+    return call_osmi_text(prompt, img_base64, context="layer1")
 
 
 def _parse_response(text: str) -> dict:
@@ -272,8 +284,9 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
     os.makedirs(output_dir, exist_ok=True)
     log.info(f"Исходное изображение: {img_w}x{img_h} px")
 
-    # Усиливаем контраст стен
-    img_enhanced = ImageEnhance.Contrast(img).enhance(2.0)
+    # Усиливаем контраст и яркость для чётких линий
+    img_enhanced = ImageEnhance.Contrast(img).enhance(2.5)
+    img_enhanced = ImageEnhance.Sharpness(img_enhanced).enhance(2.0)
 
     # Рисуем общую визуализацию полигонов на схеме
     _save_polygons_overlay(img, analysis, output_dir, img_w, img_h)
@@ -307,7 +320,7 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
             skipped.append({"name": room_label, "reason": f"полигон {poly_w}x{poly_h} px"})
             continue
 
-        # Расширяем полигон на 7px чтобы стены гарантированно внутри
+        # Расширяем полигон на 10px чтобы стены гарантированно внутри
         cx = sum(p[0] for p in px_points) / len(px_points)
         cy = sum(p[1] for p in px_points) / len(px_points)
         expanded_points = []
@@ -316,7 +329,7 @@ def _crop_rooms(image_path: str, analysis: dict, output_dir: str) -> dict:
             dy = py - cy
             dist = (dx**2 + dy**2) ** 0.5
             if dist > 0:
-                expanded_points.append((int(px + dx / dist * 7), int(py + dy / dist * 7)))
+                expanded_points.append((int(px + dx / dist * 10), int(py + dy / dist * 10)))
             else:
                 expanded_points.append((px, py))
 
@@ -389,8 +402,8 @@ def _save_polygons_overlay(img: Image.Image, analysis: dict, output_dir: str, im
         # Конвертируем в пиксели
         px_points = [(int(x / 1000 * img_w), int(y / 1000 * img_h)) for x, y in polygon]
 
-        # Рисуем полигон
-        draw.polygon(px_points, outline=color, width=3)
+        # Рисуем полигон (толстые линии для наглядности)
+        draw.polygon(px_points, outline=color, width=5)
 
         # Подписываем по центру
         cx = sum(p[0] for p in px_points) // len(px_points)

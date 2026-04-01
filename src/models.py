@@ -28,6 +28,7 @@ class RoomAnalysis(BaseModel):
     area: float
     shape: str
     analysis: str = ""
+    walls: Optional[dict[str, str]] = None
     polygon: list[list[int]] = Field(min_length=3)
     crop_path: Optional[str] = None
 

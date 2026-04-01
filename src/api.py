@@ -261,11 +261,11 @@ async def layer1_analyze(
 
     try:
         # Анализ + crop'ы
-        crops_dir = os.path.join(task_dir, "crops")
+        crops_dir = os.path.join(task_dir, "L1_crops")
         result = analyze_floorplan(image_path, output_dir=crops_dir)
 
-        # Сохраняем analysis.json
-        _save_json(os.path.join(task_dir, "analysis.json"), result)
+        # Сохраняем analysis.json в L1_crops
+        _save_json(os.path.join(crops_dir, "analysis.json"), result)
 
         # Список комнат для фронта
         rooms_list = []
@@ -319,7 +319,7 @@ async def layer2_generate(
 
     try:
         # Генерация
-        refs_dir = os.path.join(task_dir, "references")
+        refs_dir = os.path.join(task_dir, "L2_references")
         os.makedirs(refs_dir, exist_ok=True)
         safe_name = room_name.replace(" ", "_").replace("/", "-")
         ref_path = os.path.join(refs_dir, f"{safe_name}.png")
@@ -372,11 +372,11 @@ async def layer25_describe(
     log.info(f"[{task_id}] Layer2.5 | комната {room_index}: {room_name}")
 
     try:
-        artifacts_dir = os.path.join(task_dir, "artifacts", safe_name)
+        artifacts_dir = os.path.join(task_dir, "L25_artifacts", safe_name)
         result = describe_all_sides(ref_path, room, artifacts_dir)
 
         # Сохраняем артефакты
-        _save_json(os.path.join(task_dir, "artifacts", f"{safe_name}.json"), result)
+        _save_json(os.path.join(task_dir, "L25_artifacts", f"{safe_name}.json"), result)
 
         return {"status": "ok", "task_id": task_id, "room_index": room_index, "sides": result}
 
@@ -425,7 +425,7 @@ async def layer3_render(
 
     # Ищем артефакты (опционально)
     artifacts = []
-    artifacts_path = os.path.join(task_dir, "artifacts", f"{safe_name}.json")
+    artifacts_path = os.path.join(task_dir, "L25_artifacts", f"{safe_name}.json")
     if os.path.exists(artifacts_path):
         with open(artifacts_path, "r", encoding="utf-8") as f:
             all_artifacts = json.load(f)
@@ -434,7 +434,7 @@ async def layer3_render(
     log.info(f"[{task_id}] Layer3 | {room_name} → {side} | артефактов: {len(artifacts)}")
 
     try:
-        renders_dir = os.path.join(task_dir, "renders")
+        renders_dir = os.path.join(task_dir, "L3_renders")
         os.makedirs(renders_dir, exist_ok=True)
         output_path = os.path.join(renders_dir, f"{safe_name}_{side}.png")
 
@@ -481,8 +481,10 @@ def _run_task(task_id: str) -> None:
 
 
 def _create_task_dir() -> tuple[str, str]:
-    """Создаёт results/{task_id}/. Возвращает (task_id, task_dir)."""
-    task_id = uuid.uuid4().hex[:8]
+    """Создаёт results/{date}_{task_id}/. Возвращает (task_id, task_dir)."""
+    from datetime import datetime
+    date_prefix = datetime.now().strftime("%Y-%m-%d")
+    task_id = f"{date_prefix}_{uuid.uuid4().hex[:8]}"
     task_dir = os.path.join(RESULTS_BASE, task_id)
     os.makedirs(task_dir, exist_ok=True)
     return task_id, task_dir
@@ -522,7 +524,7 @@ def _load_task(task_id: str) -> tuple:
         return None, None, None, JSONResponse(status_code=404, content={"error": f"Task {task_id} не найден"})
 
     # Загружаем analysis.json
-    analysis_path = os.path.join(task_dir, "analysis.json")
+    analysis_path = os.path.join(task_dir, "L1_crops", "analysis.json")
     if not os.path.exists(analysis_path):
         return None, None, None, JSONResponse(status_code=400, content={
             "error": "analysis.json не найден. Сначала вызовите /layer1/analyze"

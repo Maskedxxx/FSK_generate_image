@@ -9,10 +9,10 @@
 
 Структура результатов в output_dir (= results/{task_id}/):
     analysis.json           — результат Слоя 1
-    crops/                  — вырезанные помещения
-    references/             — референсы (вид сверху) + _empty промежуточные
-    artifacts/              — JSON артефактов по сторонам
-    renders/                — горизонтальные фото
+    L1_crops/               — вырезанные помещения (Слой 1)
+    L2_references/          — референсы (вид сверху) + _empty промежуточные (Слой 2)
+    L25_artifacts/          — JSON артефактов по сторонам (Слой 2.5)
+    L3_renders/             — горизонтальные фото (Слой 3)
 
 Функции:
     run_pipeline()       — полный пайплайн от схемы до результатов
@@ -67,11 +67,11 @@ def run_pipeline(
 
     # === Слой 1: анализ планировки ===
     progress("Слой 1: анализ планировки...")
-    crops_dir = os.path.join(output_dir, "crops")
+    crops_dir = os.path.join(output_dir, "L1_crops")
     analysis = analyze_floorplan(image_path, output_dir=crops_dir)
 
-    # Сохраняем analysis.json
-    _save_json(os.path.join(output_dir, "analysis.json"), analysis)
+    # Сохраняем analysis.json в L1_crops
+    _save_json(os.path.join(crops_dir, "analysis.json"), analysis)
     rooms_count = len(analysis["rooms"])
     progress(f"Слой 1 готов: {rooms_count} помещений")
 
@@ -143,7 +143,7 @@ def process_room(
 
     # === Слой 2: генерация референса (двухпроходная) ===
     progress(f"Слой 2: генерация {room_name} {counter}...")
-    refs_dir = os.path.join(output_dir, "references")
+    refs_dir = os.path.join(output_dir, "L2_references")
     os.makedirs(refs_dir, exist_ok=True)
     ref_path = os.path.join(refs_dir, f"{safe_name}.png")
 
@@ -152,16 +152,16 @@ def process_room(
 
     # === Слой 2.5: описание артефактов по сторонам ===
     progress(f"Слой 2.5: артефакты {room_name} {counter}...")
-    artifacts_dir = os.path.join(output_dir, "artifacts", safe_name)
+    artifacts_dir = os.path.join(output_dir, "L25_artifacts", safe_name)
     sides_artifacts = describe_all_sides(ref_path, room, artifacts_dir)
 
     # Сохраняем артефакты
-    _save_json(os.path.join(output_dir, "artifacts", f"{safe_name}.json"), sides_artifacts)
+    _save_json(os.path.join(output_dir, "L25_artifacts", f"{safe_name}.json"), sides_artifacts)
     log.info(f"[{room_name}] Слой 2.5: артефакты описаны")
 
     # === Слой 3: горизонтальные фото для каждой стороны ===
     sides_result = {}
-    renders_dir = os.path.join(output_dir, "renders")
+    renders_dir = os.path.join(output_dir, "L3_renders")
     os.makedirs(renders_dir, exist_ok=True)
 
     for side in ["top", "bottom", "left", "right"]:
