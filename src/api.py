@@ -23,6 +23,8 @@ API — точка входа пайплайна генерации визуал
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
+from fastapi.openapi.models import APIKey, APIKeyIn
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import json
@@ -51,10 +53,16 @@ app = FastAPI(
 
 **Или одним вызовом:**
 - `POST /generate` — полный пайплайн (L1 → L2 → L3 → L4), поллить `GET /status/{task_id}`
+
+**Авторизация:** передайте API-ключ через кнопку Authorize (X-API-Key).
 """,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 log = get_logger("fsk.api")
+
+# Схема авторизации для OpenAPI (кнопка Authorize в Swagger UI)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # CORS — разрешаем фронту с любого домена (для прода ограничить)
 app.add_middleware(
