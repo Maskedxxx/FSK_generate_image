@@ -8,4 +8,6 @@ services:
     volumes:
       - ./results:/app/results
       - ./logs:/app/logs
+      - ./src:/app/src
+      - ./tests:/app/tests
     restart: unless-stopped

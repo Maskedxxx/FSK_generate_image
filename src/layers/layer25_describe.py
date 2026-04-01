@@ -12,22 +12,15 @@
     _parse_artifacts()      — парсинг JSON из ответа модели
 """
 
-import requests
 import base64
 import json
 import os
-import time
 
-from ..config import OPENROUTER_API_KEY, LAYER1_MODEL
+from ..osmi_client import call_osmi_text
 from ..logger import get_logger
 from .annotate import prepare_for_layer3
 
 log = get_logger("fsk.layer25")
-
-# Настройки retry
-MAX_RETRIES = 3
-RETRY_DELAYS = [1, 2, 4]
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 # Промпты вынесены в prompts.py — но для 2.5 они специфичные, оставляем здесь
 DESCRIBE_SYSTEM_PROMPT = """You analyze a cropped section of a room interior (top-down view). The image shows ONE wall of the room with furniture along it. The image is cropped — some items may be only partially visible (cut at the edge).
@@ -106,123 +99,34 @@ def describe_all_sides(reference_path: str, room: dict, output_dir: str) -> dict
 
 def _describe_side(image_path: str, room_name: str, side: str) -> list:
     """
-    Анализирует одну сторону — отправляет в Gemini, получает артефакты.
+    Анализирует одну сторону через OSMI-ноду FSK_Layer1_TextAnalysis.
 
     Принимает:
         image_path — путь к подготовленному изображению стороны
-        room_name — имя комнаты (для логирования)
-        side — название стороны (для логирования)
+        room_name — имя комнаты
+        side — название стороны
 
     Возвращает:
         список артефактов [{name, visibility}, ...]
-        Пустой список при ошибке парсинга
+        Пустой список при ошибке
     """
     # Кодируем изображение
     with open(image_path, "rb") as f:
         img_base64 = base64.b64encode(f.read()).decode("utf-8")
 
     user_prompt = DESCRIBE_USER_TEMPLATE.format(room_name=room_name)
+    prompt = f"{DESCRIBE_SYSTEM_PROMPT}\n\n{user_prompt}"
 
-    # Вызов API с retry
+    # Вызов OSMI текстовой ноды
     try:
-        response_text = _call_api(img_base64, user_prompt, f"{room_name}/{side}")
+        response_text = call_osmi_text(prompt, img_base64, f"{room_name}/{side}")
     except Exception as e:
-        log.error(f"[{room_name}] {side}: API ошибка — {e}")
+        log.error(f"[{room_name}] {side}: OSMI ошибка — {e}")
         return []
 
     # Парсим артефакты
     artifacts = _parse_artifacts(response_text, f"{room_name}/{side}")
     return artifacts
-
-
-def _call_api(img_base64: str, user_prompt: str, context: str = "") -> str:
-    """
-    Вызов Gemini 3 Flash через OpenRouter с retry.
-
-    Принимает:
-        img_base64 — изображение стороны в base64
-        user_prompt — промпт с именем комнаты
-        context — для логирования
-
-    Retry логика:
-        - До 3 попыток, задержка 1/2/4 сек
-        - Retry на: 429, 5xx, timeout
-        - Без retry на: 401
-
-    Возвращает:
-        текст ответа модели
-
-    Ошибки:
-        requests.HTTPError — после исчерпания попыток
-    """
-    messages = [
-        {"role": "system", "content": DESCRIBE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-            ]
-        }
-    ]
-
-    last_error = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            log.info(f"[{context}] Запрос к Gemini (попытка {attempt}/{MAX_RETRIES})")
-
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": LAYER1_MODEL,
-                    "messages": messages,
-                    "temperature": 0,
-                },
-                timeout=60,
-            )
-
-            # 401 — без retry
-            if response.status_code == 401:
-                log.error(f"[{context}] API ключ невалидный (401)")
-                response.raise_for_status()
-
-            # Retryable
-            if response.status_code in RETRYABLE_STATUS_CODES:
-                log.warning(f"[{context}] API {response.status_code}, retry через {RETRY_DELAYS[attempt - 1]} сек")
-                last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
-                if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_DELAYS[attempt - 1])
-                continue
-
-            response.raise_for_status()
-
-            data = response.json()
-            if "choices" not in data:
-                raise ValueError(f"Ответ без choices: {json.dumps(data, ensure_ascii=False)[:300]}")
-
-            text = data["choices"][0]["message"]["content"]
-            log.info(f"[{context}] Ответ: {len(text)} символов")
-            return text
-
-        except requests.Timeout:
-            log.warning(f"[{context}] Timeout (попытка {attempt}/{MAX_RETRIES})")
-            last_error = requests.Timeout("API timeout")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAYS[attempt - 1])
-
-        except requests.ConnectionError as e:
-            log.warning(f"[{context}] Connection error (попытка {attempt}/{MAX_RETRIES})")
-            last_error = e
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAYS[attempt - 1])
-
-    log.error(f"[{context}] Все {MAX_RETRIES} попыток исчерпаны")
-    raise last_error
 
 
 def _parse_artifacts(text: str, context: str = "") -> list:

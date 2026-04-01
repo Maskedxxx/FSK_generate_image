@@ -33,6 +33,10 @@ __pycache__/
 # Секреты
 .env
 
+# Pytest кэш
+.pytest_cache/
+pytest-of-mask/
+
 # Временные файлы
 *.tmp
 *.bak

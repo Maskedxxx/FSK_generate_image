@@ -22,8 +22,12 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image-preview")
 
 # OSMI (Flowise) эндпоинты
-OSMI_LAYER1_URL = os.getenv("OSMI_LAYER1_URL", "https://app.osmi-ai.ru/api/v1/prediction/ffe02989-9afc-4f3f-a054-e9210ccadf43")
-OSMI_LAYER2_URL = os.getenv("OSMI_LAYER2_URL", "https://app.osmi-ai.ru/api/v1/prediction/c86d4578-b9b7-4080-b689-dc08c6657c7f")
+# FSK_Layer1_TextAnalysis — текстовый анализ (Gemini Flash)
+OSMI_LAYER1_URL = os.getenv("OSMI_LAYER1_URL", "")
+# FSK_Layer2_ImageGen — генерация картинки с 1 изображением (Gemini Image)
+OSMI_LAYER2_URL = os.getenv("OSMI_LAYER2_URL", "")
+# FSK_Layer2_ImageGen_Dual — генерация картинки с 2 изображениями (Gemini Image)
+OSMI_LAYER2_DUAL_URL = os.getenv("OSMI_LAYER2_DUAL_URL", "")
 
 # API-ключ для авторизации фронта
 FSK_API_KEY = os.getenv("FSK_API_KEY", "")
