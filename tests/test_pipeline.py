@@ -146,15 +146,15 @@ def test_pipeline_creates_files(test_image, valid_answers, mock_all_layers, tmp_
     assert os.path.exists(os.path.join(output_dir, "analysis.json"))
 
     # crops/
-    assert os.path.exists(os.path.join(output_dir, "crops"))
+    assert os.path.exists(os.path.join(output_dir, "L1_crops"))
 
     # references/
-    refs_dir = os.path.join(output_dir, "references")
+    refs_dir = os.path.join(output_dir, "L2_references")
     assert os.path.exists(refs_dir)
     assert len(os.listdir(refs_dir)) >= 2  # 2 комнаты × (ref + empty)
 
     # renders/
-    renders_dir = os.path.join(output_dir, "renders")
+    renders_dir = os.path.join(output_dir, "L3_renders")
     assert os.path.exists(renders_dir)
     assert len(os.listdir(renders_dir)) >= 8  # 2 комнаты × 4 стороны
 
@@ -218,3 +218,46 @@ def test_process_room(valid_answers, mock_all_layers, tmp_path):
     assert result["area"] == 17.7
     assert "reference" in result
     assert set(result["sides"].keys()) == {"top", "bottom", "left", "right"}
+curl -X POST https://inl2k4-213-163-196-47.ru.tuna.am/generate -H "X-API-Key: fsk-gen-2026-a7b3c9d1e5f2" -F "image=@/Users/mask/Downloads/конеткст_для_агента/Валидные/Снимок экрана 2026-03-10 130257.jpg" -F 'answers={"style":"Скандинавский","colors":"Светлые (белый, беж, серый)","materials":["Натуральное дерево"],"residents":"2 взрослых без детей","work_from_home":"Нет, работа вне дома","hobby":"Чтение и коллекционирование (полки, библиотека, кресло)","bathroom_layout":"Совмещённый санузел","bath_type":"Душевая","storage":["Чемоданы"]}'    
+
+const fetch = require('node-fetch');                                 
+                                                                                                                                            
+try {                                                                                                                                     
+    const parts = $input.split('|||');                                                                                                    
+    const prompt = parts[0] || "";                                                                                                        
+    const imageBase64 = parts[1] || "";                                                                                                   
+                                                                                                                                        
+    const messages = imageBase64                                                  
+        ? [{                                                                                                                              
+            role: "user",                                                                                                                 
+            content: [                                                                                                                    
+                { type: "text", text: prompt },                                                                                           
+                { type: "image_url", image_url: { url: "data:image/jpeg;base64," + imageBase64 } }                                        
+            ]                                                                                                                             
+        }]                                                                                                                              
+        : [{ role: "user", content: prompt }];                                                                                            
+                                                                                                                                        
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {                                                       
+        method: "POST",                                                                                                                   
+        headers: {                                                                                                                        
+            "Authorization": "Bearer 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",                          
+            "Content-Type": "application/json"                                                                                            
+        },                                                                                                                                
+        body: JSON.stringify({                                                                                                            
+            model: "google/gemini-3-flash-preview",                                                                                       
+            messages: messages,                                                                                                           
+            temperature: 0                                                                                                                
+        })                                                                                                                                
+    });                                                                                                                                   
+                                                                                                                                        
+    const data = await response.json();                                                                                                   
+                                                                                                                                        
+    if (!data.choices) {                                                                                                                  
+        return JSON.stringify({ error: data.error || "Нет ответа" });                                                                     
+    }                                                                                                                                     
+                                                                                                                                        
+    return data.choices[0].message.content;                                                                                               
+                                                                                                                                        
+} catch (err) {                                                                                                                           
+    return JSON.stringify({ error: err.message });                                                                                        
+}

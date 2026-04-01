@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.layers.layer2_generate import _upscale_and_encode, _extract_image, generate_room
+from src.layers.layer2_generate import _upscale_and_encode, generate_room
 from src.prompts import build_layer2_prompt
 from src.questionnaire import TEST_ANSWERS, validate_answers
 
@@ -98,36 +98,6 @@ def test_upscale_not_image(tmp_path):
         _upscale_and_encode(str(bad), "test")
 
 
-# === ТЕСТЫ: _extract_image ===
-
-
-def test_extract_success():
-    """Ответ с изображением — извлекает base64."""
-    msg = {"images": [{"image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}]}
-    assert _extract_image(msg, "test") == "iVBORw0KGgo="
-
-
-def test_extract_no_images():
-    """Нет изображений — ValueError."""
-    msg = {"content": "Не могу сгенерировать", "images": []}
-    with pytest.raises(ValueError, match="не сгенерировал"):
-        _extract_image(msg, "test")
-
-
-def test_extract_no_images_key():
-    """Нет ключа images — ValueError."""
-    msg = {"content": "Только текст"}
-    with pytest.raises(ValueError, match="не сгенерировал"):
-        _extract_image(msg, "test")
-
-
-def test_extract_bad_url():
-    """URL не data: — ValueError."""
-    msg = {"images": [{"image_url": {"url": "https://example.com/img.png"}}]}
-    with pytest.raises(ValueError, match="Неожиданный формат"):
-        _extract_image(msg, "test")
-
-
 # === ТЕСТЫ: build_layer2_prompt ===
 
 
@@ -168,7 +138,8 @@ def test_generate_success(small_crop, valid_room, valid_answers, tmp_path):
     output = str(tmp_path / "refs" / "reference.png")
 
     fake_msg = {"images": [{"image_url": {"url": f"data:image/png;base64,{FAKE_PNG_B64}"}}]}
-    with patch("src.layers.layer2_generate._call_api", return_value=fake_msg):
+    with patch("src.layers.layer2_generate.call_osmi_image", return_value=FAKE_PNG_B64), \
+         patch("src.layers.layer2_generate.call_osmi_image_dual", return_value=FAKE_PNG_B64):
         result = generate_room(valid_room, valid_answers, small_crop, output)
 
     assert result == output
@@ -182,9 +153,8 @@ def test_generate_crop_not_found(valid_room, valid_answers, tmp_path):
 
 
 def test_generate_no_image(small_crop, valid_room, valid_answers, tmp_path):
-    """Модель не вернула изображение — ValueError."""
+    """OSMI не вернула изображение — ValueError."""
     valid_room["crop_path"] = small_crop
-    fake_msg = {"content": "Отказ", "images": []}
-    with patch("src.layers.layer2_generate._call_api", return_value=fake_msg):
-        with pytest.raises(ValueError, match="не сгенерировал"):
+    with patch("src.layers.layer2_generate.call_osmi_image", side_effect=ValueError("OSMI не вернул изображение")):
+        with pytest.raises(ValueError, match="не вернул"):
             generate_room(valid_room, valid_answers, small_crop, str(tmp_path / "ref.png"))

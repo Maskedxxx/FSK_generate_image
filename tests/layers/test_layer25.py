@@ -94,7 +94,7 @@ def test_describe_all_sides_success(reference_image, valid_room, tmp_path):
     """Полный вызов 4 сторон с моком — возвращает артефакты для каждой."""
     output_dir = str(tmp_path / "artifacts")
 
-    with patch("src.layers.layer25_describe._call_api", return_value=MOCK_API_RESPONSE):
+    with patch("src.layers.layer25_describe.call_osmi_text", return_value=MOCK_API_RESPONSE):
         result = describe_all_sides(reference_image, valid_room, output_dir)
 
     # Все 4 стороны
@@ -116,7 +116,7 @@ def test_describe_all_sides_creates_side_images(reference_image, valid_room, tmp
     """Создаёт подготовленные изображения для каждой стороны."""
     output_dir = str(tmp_path / "artifacts")
 
-    with patch("src.layers.layer25_describe._call_api", return_value=MOCK_API_RESPONSE):
+    with patch("src.layers.layer25_describe.call_osmi_text", return_value=MOCK_API_RESPONSE):
         describe_all_sides(reference_image, valid_room, output_dir)
 
     # Файлы сторон созданы
@@ -134,7 +134,7 @@ def test_describe_api_error_returns_empty(reference_image, valid_room, tmp_path)
     """Ошибка API — пустой список артефактов (не исключение)."""
     output_dir = str(tmp_path / "artifacts")
 
-    with patch("src.layers.layer25_describe._call_api", side_effect=Exception("API down")):
+    with patch("src.layers.layer25_describe.call_osmi_text", side_effect=Exception("API down")):
         result = describe_all_sides(reference_image, valid_room, output_dir)
 
     # Все стороны пустые — но не падает
