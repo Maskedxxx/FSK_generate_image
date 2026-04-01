@@ -1,5 +1,7 @@
 services:
   api:
+    image: fskhome-llm
+    container_name: fskhome-llm
     build: .
     ports:
       - "${APP_PORT:-8000}:8000"
