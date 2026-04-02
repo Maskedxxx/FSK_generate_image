@@ -99,6 +99,16 @@ def run_pipeline(
                 log.warning(f"[{room_name}] Нет crop — пропускаем")
                 continue
 
+            # Если crop_path — ключ S3, скачиваем в temp
+            crop_path = room["crop_path"]
+            if not os.path.exists(crop_path):
+                local_crop = os.path.join(tmp_dir, "L1_crops", os.path.basename(crop_path))
+                os.makedirs(os.path.dirname(local_crop), exist_ok=True)
+                crop_data = storage.read_bytes(crop_path)
+                with open(local_crop, "wb") as f:
+                    f.write(crop_data)
+                room["crop_path"] = local_crop
+
             room_result = process_room(
                 room=room,
                 answers=answers,
