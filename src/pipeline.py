@@ -135,7 +135,9 @@ def run_pipeline(
             schema_path = os.path.join(crops_dir, "schema_x2.png")
             composite_dir = os.path.join(tmp_dir, "L4_composite")
             try:
-                render_composite(schema_path, reference_paths, composite_dir)
+                # Передаём rooms с полигонами для stitch
+                rooms_with_poly = [r for r in analysis.get("rooms", []) if "crop_path" in r]
+                render_composite(schema_path, reference_paths, composite_dir, rooms_with_poly)
                 _upload_dir(storage, task_id, "L4_composite", composite_dir)
                 composite_key = f"{task_id}/L4_composite/composite.png"
                 progress("Слой 4 готов")
