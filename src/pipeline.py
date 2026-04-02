@@ -1,17 +1,12 @@
 """
 Оркестратор пайплайна генерации визуализаций.
 
-Связывает все слои в единый процесс:
-    Слой 1 → анализ планировки → JSON + crop'ы
-    Слой 2 → генерация референса сверху с мебелью (1 проход)
-    Слой 3 → рендер из 2 угловых ракурсов (30° и 222°)
-    Слой 4 → общий рендер всей квартиры сверху
+Слои работают с локальным temp. После каждого слоя — upload в хранилище (S3/local).
 
-Структура результатов в output_dir (= results/{task_id}/):
-    L1_crops/               — анализ + кропы помещений (Слой 1)
-    L2_references/          — референсы вид сверху (Слой 2)
-    L3_renders/             — фото из угловых ракурсов (Слой 3)
-    L4_composite/           — общий рендер квартиры (Слой 4)
+    Слой 1 → анализ планировки → JSON + crop'ы → upload L1_crops/
+    Слой 2 → генерация референса с мебелью → upload L2_references/
+    Слой 3 → рендер с 2 сторон → upload L3_renders/
+    Слой 4 → общий рендер квартиры → upload L4_composite/
 
 Функции:
     run_pipeline()       — полный пайплайн от схемы до результатов
@@ -23,98 +18,141 @@
 
 import os
 import json
+import shutil
+import tempfile
 from typing import Callable
 
 from .layers.layer1_analyze import analyze_floorplan
 from .layers.layer2_generate import generate_room
 from .layers.layer3_render import render_angles
 from .layers.layer4_composite import render_composite
+from .storage import StorageBackend, create_storage
 from .logger import get_logger
 
 log = get_logger("fsk.pipeline")
 
 
 def run_pipeline(
+    task_id: str,
     image_path: str,
     answers: dict,
-    output_dir: str,
+    storage: StorageBackend = None,
     on_progress: Callable[[str], None] = None,
 ) -> dict:
     """
     Полный пайплайн: планировка + опросник → визуализации всех комнат.
+    Слои работают с temp-директорией, результаты загружаются в storage.
 
     Принимает:
+        task_id — идентификатор задачи
         image_path — путь к изображению планировки (JPG/PNG)
         answers — валидированные ответы опросника
-        output_dir — папка задачи (results/{task_id}/)
+        storage — хранилище (S3/local), если None — создаётся по конфигу
         on_progress — колбэк для обновления прогресса (опционально)
 
-    Выполняет:
-        1. Слой 1: анализ планировки → analysis.json + crops/
-        2. Для каждой комнаты: process_room()
-
     Возвращает:
-        dict {rooms_count, rooms: [...], composite: path}
+        dict {rooms_count, rooms: [...], composite: key}
     """
-    os.makedirs(output_dir, exist_ok=True)
+    if storage is None:
+        storage = create_storage()
+
+    # Temp-директория для работы слоёв
+    tmp_dir = tempfile.mkdtemp(prefix=f"fsk_{task_id}_")
+    log.info(f"Рабочая директория: {tmp_dir}")
 
     def progress(msg: str) -> None:
-        """Обновляет прогресс и логирует."""
         log.info(msg)
         if on_progress:
             on_progress(msg)
 
-    # === Слой 1: анализ планировки ===
-    progress("Слой 1: анализ планировки...")
-    crops_dir = os.path.join(output_dir, "L1_crops")
-    analysis = analyze_floorplan(image_path, output_dir=crops_dir)
+    try:
+        # === Слой 1: анализ планировки ===
+        progress("Слой 1: анализ планировки...")
+        crops_dir = os.path.join(tmp_dir, "L1_crops")
+        analysis = analyze_floorplan(image_path, output_dir=crops_dir)
 
-    # Сохраняем analysis.json в L1_crops
-    _save_json(os.path.join(crops_dir, "analysis.json"), analysis)
-    rooms_count = len(analysis["rooms"])
-    progress(f"Слой 1 готов: {rooms_count} помещений")
+        # Сохраняем analysis.json
+        _save_json(os.path.join(crops_dir, "analysis.json"), analysis)
+        rooms_count = len(analysis["rooms"])
 
-    # === Обработка каждой комнаты (Слой 2 → 3) ===
-    rooms_result = []
-    reference_paths = []
+        # Upload L1_crops в хранилище
+        _upload_dir(storage, task_id, "L1_crops", crops_dir)
 
-    for i, room in enumerate(analysis["rooms"]):
-        room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
+        # Переписываем crop_path на ключи хранилища (для Слоя 2)
+        for room in analysis.get("rooms", []):
+            if "crop_path" in room:
+                rel = os.path.relpath(room["crop_path"], tmp_dir)
+                room["crop_path"] = f"{task_id}/{rel}"
+        # Перезаписываем analysis.json с корректными путями
+        storage.write_json(f"{task_id}/L1_crops/analysis.json", analysis)
 
-        if "crop_path" not in room:
-            log.warning(f"[{room_name}] Нет crop — пропускаем")
-            continue
+        progress(f"Слой 1 готов: {rooms_count} помещений")
 
-        room_result = process_room(
-            room=room,
-            answers=answers,
-            output_dir=output_dir,
-            room_index=i,
-            rooms_total=rooms_count,
-            on_progress=on_progress,
-        )
-        rooms_result.append(room_result)
-        reference_paths.append(room_result["reference"])
+        # === Обработка каждой комнаты (Слой 2 → 3) ===
+        rooms_result = []
+        reference_paths = []
 
-    # === Слой 4: общий рендер квартиры ===
-    composite_path = None
-    if reference_paths:
-        progress("Слой 4: общий рендер квартиры...")
-        schema_path = os.path.join(crops_dir, "schema_x2.png")
-        composite_dir = os.path.join(output_dir, "L4_composite")
-        try:
-            composite_path = render_composite(schema_path, reference_paths, composite_dir)
-            progress("Слой 4 готов")
-        except Exception as e:
-            log.error(f"Слой 4 ОШИБКА: {e}")
+        for i, room in enumerate(analysis["rooms"]):
+            room_name = room["name"] if room["name"] != "Nan" else f"room_{room['area']}m2"
 
-    progress(f"Готово: {len(rooms_result)} комнат обработано")
+            if "crop_path" not in room:
+                log.warning(f"[{room_name}] Нет crop — пропускаем")
+                continue
 
-    return {
-        "rooms_count": len(rooms_result),
-        "rooms": rooms_result,
-        "composite": composite_path,
-    }
+            room_result = process_room(
+                room=room,
+                answers=answers,
+                output_dir=tmp_dir,
+                room_index=i,
+                rooms_total=rooms_count,
+                on_progress=on_progress,
+            )
+            rooms_result.append(room_result)
+            reference_paths.append(room_result["reference"])
+
+        # Upload L2_references и L3_renders
+        refs_dir = os.path.join(tmp_dir, "L2_references")
+        renders_dir = os.path.join(tmp_dir, "L3_renders")
+        if os.path.exists(refs_dir):
+            _upload_dir(storage, task_id, "L2_references", refs_dir)
+        if os.path.exists(renders_dir):
+            _upload_dir(storage, task_id, "L3_renders", renders_dir)
+
+        # === Слой 4: общий рендер квартиры ===
+        composite_key = None
+        if reference_paths:
+            progress("Слой 4: общий рендер квартиры...")
+            schema_path = os.path.join(crops_dir, "schema_x2.png")
+            composite_dir = os.path.join(tmp_dir, "L4_composite")
+            try:
+                render_composite(schema_path, reference_paths, composite_dir)
+                _upload_dir(storage, task_id, "L4_composite", composite_dir)
+                composite_key = f"{task_id}/L4_composite/composite.png"
+                progress("Слой 4 готов")
+            except Exception as e:
+                log.error(f"Слой 4 ОШИБКА: {e}")
+
+        progress(f"Готово: {len(rooms_result)} комнат обработано")
+
+        # Формируем результат с ключами хранилища (не локальными путями)
+        for room_res in rooms_result:
+            safe = room_res["name"].replace(" ", "_").replace("/", "-")
+            room_res["reference"] = f"{task_id}/L2_references/{safe}.png"
+            if "renders" in room_res:
+                for side_key, local_path in room_res["renders"].items():
+                    fname = os.path.basename(local_path)
+                    room_res["renders"][side_key] = f"{task_id}/L3_renders/{fname}"
+
+        return {
+            "rooms_count": len(rooms_result),
+            "rooms": rooms_result,
+            "composite": composite_key,
+        }
+
+    finally:
+        # Очистка temp-директории
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        log.info(f"Temp очищен: {tmp_dir}")
 
 
 def process_room(
@@ -190,3 +228,19 @@ def _save_json(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _upload_dir(storage: StorageBackend, task_id: str, prefix: str, local_dir: str) -> None:
+    """Загружает все файлы из локальной папки в хранилище."""
+    if not os.path.exists(local_dir):
+        return
+    count = 0
+    for root, dirs, files in os.walk(local_dir):
+        for fname in files:
+            local_path = os.path.join(root, fname)
+            rel = os.path.relpath(local_path, local_dir)
+            key = f"{task_id}/{prefix}/{rel}"
+            with open(local_path, "rb") as f:
+                storage.write_bytes(key, f.read())
+            count += 1
+    log.info(f"Upload {prefix}: {count} файлов → {task_id}/{prefix}/")

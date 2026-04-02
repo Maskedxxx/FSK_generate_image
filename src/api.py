@@ -21,9 +21,8 @@ API — точка входа пайплайна генерации визуал
 Запуск: uvicorn src.api:app --reload
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request, Security
 from fastapi.responses import JSONResponse
-from fastapi.openapi.models import APIKey, APIKeyIn
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -37,8 +36,13 @@ from .pipeline import run_pipeline
 from .layers.layer1_analyze import analyze_floorplan
 from .layers.layer2_generate import generate_room
 from .layers.layer3_render import render_angles
+from .storage import create_storage
+from . import task_manager
 from .logger import get_logger
 from .config import FSK_API_KEY
+
+# Схема авторизации для OpenAPI (кнопка Authorize в Swagger UI)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 app = FastAPI(
     title="FSK Generate Image",
@@ -57,12 +61,10 @@ app = FastAPI(
 **Авторизация:** передайте API-ключ через кнопку Authorize (X-API-Key).
 """,
     swagger_ui_parameters={"persistAuthorization": True},
+    dependencies=[Security(api_key_header)],
 )
 
 log = get_logger("fsk.api")
-
-# Схема авторизации для OpenAPI (кнопка Authorize в Swagger UI)
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # CORS — разрешаем фронту с любого домена (для прода ограничить)
 app.add_middleware(
@@ -73,15 +75,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Хранилище задач в памяти (для прода → Redis/БД)
-tasks: dict = {}
+# Хранилище (S3 или local — по конфигу)
+storage = create_storage()
 
-# Корневая папка результатов
-RESULTS_BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
-os.makedirs(RESULTS_BASE, exist_ok=True)
-
-# Раздача файлов результатов: /files/{task_id}/crops/1_room.png
-app.mount("/files", StaticFiles(directory=RESULTS_BASE), name="files")
+# Раздача файлов для local режима
+from .storage import LocalStorageBackend
+if isinstance(storage, LocalStorageBackend):
+    app.mount("/files", StaticFiles(directory=storage.base_path), name="files")
 
 
 # === ОБЩИЕ ===
@@ -144,30 +144,34 @@ async def generate(
         return JSONResponse(status_code=400, content={"error": "Файл превышает максимальный размер 20 МБ"})
 
     # Создаём task
-    task_id, task_dir = _create_task_dir()
-    ext = os.path.splitext(image.filename)[1] if image.filename else ".jpg"
-    image_path = os.path.join(task_dir, f"input{ext}")
-    with open(image_path, "wb") as f:
-        f.write(image_bytes)
+    task_id = _generate_task_id()
 
-    # Сохраняем meta
-    _save_meta(task_dir, request, {"type": "pipeline", "answers": validated})
+    # Сохраняем input в хранилище
+    ext = os.path.splitext(image.filename)[1] if image.filename else ".jpg"
+    storage.write_bytes(f"{task_id}/input{ext}", image_bytes)
+
+    # Сохраняем meta в хранилище
+    meta = {
+        "created_at": datetime.now().isoformat(),
+        "client_ip": request.client.host if request.client else "unknown",
+        "user_agent": request.headers.get("user-agent", "unknown"),
+        "type": "pipeline",
+        "answers": validated,
+    }
+    storage.write_json(f"{task_id}/meta.json", meta)
+
+    # Сохраняем input во temp для пайплайна
+    import tempfile
+    tmp_input = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    tmp_input.write(image_bytes)
+    tmp_input.close()
 
     log.info(f"[{task_id}] Pipeline | {len(image_bytes) // 1024} KB")
 
-    # Регистрируем
-    tasks[task_id] = {
-        "status": "processing",
-        "created_at": datetime.now().isoformat(),
-        "progress": "Запуск пайплайна...",
-        "image_path": image_path,
-        "task_dir": task_dir,
-        "answers": validated,
-        "result": None,
-        "error": None,
-    }
+    # Создаём задачу в хранилище
+    task_manager.create_task(storage, task_id, validated)
 
-    background_tasks.add_task(_run_task, task_id)
+    background_tasks.add_task(_run_task, task_id, tmp_input.name, validated)
     return {"task_id": task_id, "status": "processing"}
 
 
@@ -178,16 +182,16 @@ def get_status(task_id: str):
     **Выход:** status (processing/done/error), progress (текущий шаг), created_at.
     **Когда использовать:** поллить каждые 2-5 сек пока status != "done".
     """
-    if task_id not in tasks:
+    task = task_manager.get_task(storage, task_id)
+    if task is None:
         return JSONResponse(status_code=404, content={"error": "Задача не найдена"})
 
-    task = tasks[task_id]
     return {
         "task_id": task_id,
-        "status": task["status"],
-        "progress": task["progress"],
-        "created_at": task["created_at"],
-        "error": task["error"],
+        "status": task.get("status"),
+        "progress": task.get("progress"),
+        "created_at": task.get("created_at"),
+        "error": task.get("error"),
     }
 
 
@@ -198,22 +202,24 @@ def get_result(task_id: str, request: Request):
     **200:** `{rooms_count, rooms: [{name, area, reference, renders: {side_a, side_b}}], composite}`.
     **202:** ещё обрабатывается. **500:** ошибка. **404:** task не найден.
     """
-    if task_id not in tasks:
+    task = task_manager.get_task(storage, task_id)
+    if task is None:
         return JSONResponse(status_code=404, content={"error": "Задача не найдена"})
 
-    task = tasks[task_id]
-
-    if task["status"] == "processing":
+    if task.get("status") == "processing":
         return JSONResponse(status_code=202, content={
-            "task_id": task_id, "status": "processing", "progress": task["progress"],
+            "task_id": task_id, "status": "processing", "progress": task.get("progress"),
         })
 
-    if task["status"] == "error":
+    if task.get("status") == "error":
         return JSONResponse(status_code=500, content={
-            "task_id": task_id, "status": "error", "error": task["error"],
+            "task_id": task_id, "status": "error", "error": task.get("error"),
         })
 
-    return {"task_id": task_id, "status": "done", "result": _convert_result_paths(task["result"], request)}
+    # Заменяем ключи хранилища на presigned URLs
+    result = task.get("result", {})
+    result = _keys_to_urls(result)
+    return {"task_id": task_id, "status": "done", "result": result}
 
 
 # === СЛОИ (работают внутри существующего task) ===
@@ -251,25 +257,48 @@ async def layer1_analyze(
     if len(image_bytes) > 20 * 1024 * 1024:
         return JSONResponse(status_code=400, content={"error": "Файл превышает 20 МБ"})
 
-    # Создаём task
-    task_id, task_dir = _create_task_dir()
-    ext = os.path.splitext(image.filename)[1] if image.filename else ".jpg"
-    image_path = os.path.join(task_dir, f"input{ext}")
-    with open(image_path, "wb") as f:
-        f.write(image_bytes)
+    import tempfile
 
-    # Сохраняем meta с опросником (для Слоя 2)
-    _save_meta(task_dir, request, {"type": "layer1", "answers": validated})
+    task_id = _generate_task_id()
+    ext = os.path.splitext(image.filename)[1] if image.filename else ".jpg"
+
+    # Сохраняем input в хранилище
+    storage.write_bytes(f"{task_id}/input{ext}", image_bytes)
+
+    # Мета в хранилище
+    meta = {
+        "created_at": datetime.now().isoformat(),
+        "client_ip": request.client.host if request.client else "unknown",
+        "user_agent": request.headers.get("user-agent", "unknown"),
+        "type": "layer1",
+        "answers": validated,
+    }
+    storage.write_json(f"{task_id}/meta.json", meta)
+
+    # Temp файл для слоя
+    tmp_input = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    tmp_input.write(image_bytes)
+    tmp_input.close()
 
     log.info(f"[{task_id}] Layer1 | {len(image_bytes) // 1024} KB")
 
     try:
-        # Анализ + crop'ы
-        crops_dir = os.path.join(task_dir, "L1_crops")
-        result = analyze_floorplan(image_path, output_dir=crops_dir)
+        # Анализ + crop'ы в temp
+        tmp_dir = tempfile.mkdtemp(prefix=f"fsk_l1_{task_id}_")
+        crops_dir = os.path.join(tmp_dir, "L1_crops")
+        result = analyze_floorplan(tmp_input.name, output_dir=crops_dir)
 
-        # Сохраняем analysis.json в L1_crops
-        _save_json(os.path.join(crops_dir, "analysis.json"), result)
+        # Сохраняем analysis.json
+        _save_json_local(os.path.join(crops_dir, "analysis.json"), result)
+
+        # Upload в хранилище
+        from .pipeline import _upload_dir
+        _upload_dir(storage, task_id, "L1_crops", crops_dir)
+
+        # Очистка temp
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        os.unlink(tmp_input.name)
 
         # Список комнат для фронта
         rooms_list = []
@@ -395,60 +424,44 @@ async def layer3_render(
 # === ФОНОВЫЕ ЗАДАЧИ ===
 
 
-def _run_task(task_id: str) -> None:
+def _run_task(task_id: str, image_path: str, answers: dict) -> None:
     """Запуск пайплайна в фоне."""
-    task = tasks[task_id]
 
     def on_progress(message: str) -> None:
-        task["progress"] = message
+        task_manager.update_progress(storage, task_id, message)
 
     try:
         result = run_pipeline(
-            image_path=task["image_path"],
-            answers=task["answers"],
-            output_dir=task["task_dir"],
+            task_id=task_id,
+            image_path=image_path,
+            answers=answers,
+            storage=storage,
             on_progress=on_progress,
         )
 
-        task["status"] = "done"
-        task["progress"] = "Готово"
-        task["result"] = result
+        task_manager.complete_task(storage, task_id, result)
         log.info(f"[{task_id}] Pipeline завершён: {result['rooms_count']} комнат")
 
     except Exception as e:
-        task["status"] = "error"
-        task["error"] = str(e)
-        task["progress"] = f"Ошибка: {str(e)}"
+        task_manager.fail_task(storage, task_id, str(e))
         log.error(f"[{task_id}] Pipeline ошибка: {e}")
+    finally:
+        # Удаляем temp input
+        if os.path.exists(image_path):
+            os.unlink(image_path)
 
 
 # === УТИЛИТЫ ===
 
 
-def _create_task_dir() -> tuple[str, str]:
-    """Создаёт results/{date}_{task_id}/. Возвращает (task_id, task_dir)."""
-    from datetime import datetime
+def _generate_task_id() -> str:
+    """Генерирует уникальный task_id: дата + UUID."""
     date_prefix = datetime.now().strftime("%Y-%m-%d")
-    task_id = f"{date_prefix}_{uuid.uuid4().hex[:8]}"
-    task_dir = os.path.join(RESULTS_BASE, task_id)
-    os.makedirs(task_dir, exist_ok=True)
-    return task_id, task_dir
+    return f"{date_prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def _save_meta(task_dir: str, request: Request, extra: dict = None) -> None:
-    """Сохраняет meta.json."""
-    meta = {
-        "created_at": datetime.now().isoformat(),
-        "client_ip": request.client.host if request.client else "unknown",
-        "user_agent": request.headers.get("user-agent", "unknown"),
-    }
-    if extra:
-        meta.update(extra)
-    _save_json(os.path.join(task_dir, "meta.json"), meta)
-
-
-def _save_json(path: str, data: dict) -> None:
-    """Сохраняет dict в JSON."""
+def _save_json_local(path: str, data: dict) -> None:
+    """Сохраняет dict в JSON на локальный диск."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -456,37 +469,29 @@ def _save_json(path: str, data: dict) -> None:
 
 def _load_task(task_id: str) -> tuple:
     """
-    Загружает данные task'а с диска.
+    Загружает данные task'а из хранилища.
 
     Возвращает:
-        (task_dir, analysis, answers, error)
+        (task_id, analysis, answers, error)
         error = None если ок, JSONResponse если ошибка
     """
-    task_dir = os.path.join(RESULTS_BASE, task_id)
-
-    # Проверяем что task существует
-    if not os.path.exists(task_dir):
-        return None, None, None, JSONResponse(status_code=404, content={"error": f"Task {task_id} не найден"})
-
-    # Загружаем analysis.json
-    analysis_path = os.path.join(task_dir, "L1_crops", "analysis.json")
-    if not os.path.exists(analysis_path):
+    # Проверяем что analysis.json есть
+    analysis_key = f"{task_id}/L1_crops/analysis.json"
+    if not storage.exists(analysis_key):
         return None, None, None, JSONResponse(status_code=400, content={
             "error": "analysis.json не найден. Сначала вызовите /layer1/analyze"
         })
 
-    with open(analysis_path, "r", encoding="utf-8") as f:
-        analysis = json.load(f)
+    analysis = storage.read_json(analysis_key)
 
     # Загружаем answers из meta.json
-    meta_path = os.path.join(task_dir, "meta.json")
     answers = {}
-    if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
+    meta_key = f"{task_id}/meta.json"
+    if storage.exists(meta_key):
+        meta = storage.read_json(meta_key)
         answers = meta.get("answers", {})
 
-    return task_dir, analysis, answers, None
+    return task_id, analysis, answers, None
 
 
 def _get_room(analysis: dict, room_index: int, task_id: str) -> tuple:
@@ -513,31 +518,17 @@ def _get_room(analysis: dict, room_index: int, task_id: str) -> tuple:
     return room, None
 
 
-def _path_to_url(file_path: str, request: Request) -> str:
-    """
-    Конвертирует абсолютный путь к файлу в URL для фронта.
-    results/abc123/crops/1_room.png → http://host/files/abc123/crops/1_room.png
-    """
-    if not file_path or not isinstance(file_path, str):
-        return file_path
-    # Вырезаем путь относительно RESULTS_BASE
-    try:
-        rel_path = os.path.relpath(file_path, RESULTS_BASE)
-        return f"{request.base_url}files/{rel_path}"
-    except ValueError:
-        return file_path
-
-
-def _convert_result_paths(result: dict, request: Request) -> dict:
-    """
-    Рекурсивно заменяет абсолютные пути в результатах на URL.
-    """
+def _keys_to_urls(result) -> dict:
+    """Рекурсивно заменяет ключи хранилища на presigned URLs."""
     if isinstance(result, dict):
-        return {k: _convert_result_paths(v, request) for k, v in result.items()}
+        return {k: _keys_to_urls(v) for k, v in result.items()}
     elif isinstance(result, list):
-        return [_convert_result_paths(item, request) for item in result]
-    elif isinstance(result, str) and result.startswith("/") and os.path.exists(result):
-        return _path_to_url(result, request)
+        return [_keys_to_urls(item) for item in result]
+    elif isinstance(result, str) and "/" in result and result.endswith((".png", ".jpg", ".json")):
+        try:
+            return storage.presigned_url(result)
+        except Exception:
+            return result
     return result
 
 

@@ -15,6 +15,9 @@ pydantic==2.12.5
 # Переменные окружения
 python-dotenv==1.1.0
 
+# S3 хранилище (Yandex Object Storage)
+boto3>=1.35.0
+
 # Тесты (dev)
 pytest==9.0.2
 pytest-anyio==0.0.0
