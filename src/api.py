@@ -219,6 +219,8 @@ def get_result(task_id: str, request: Request):
     # Заменяем ключи хранилища на presigned URLs
     result = task.get("result", {})
     result = _keys_to_urls(result)
+    # Очищаем NaN значения (не JSON-совместимы)
+    result = _clean_nan(result)
     return {"task_id": task_id, "status": "done", "result": result}
 
 
@@ -530,6 +532,18 @@ def _keys_to_urls(result) -> dict:
         except Exception:
             return result
     return result
+
+
+def _clean_nan(data):
+    """Заменяет NaN/Inf на None для JSON-совместимости."""
+    import math
+    if isinstance(data, dict):
+        return {k: _clean_nan(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_clean_nan(item) for item in data]
+    elif isinstance(data, float) and (math.isnan(data) or math.isinf(data)):
+        return None
+    return data
 
 
 def _check_api_key(request: Request):

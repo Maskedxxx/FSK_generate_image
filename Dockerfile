@@ -7,8 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Код
-COPY src/ src/
-COPY tests/ tests/
+COPY osmi_nodes/image_service.py .
 
 # Папка результатов
 RUN mkdir -p results logs
@@ -19,4 +18,4 @@ EXPOSE 8000
 # Запуск
 # WORKERS=1 пока tasks хранятся в памяти. Для масштабирования → Redis + WORKERS=4+
 ENV WORKERS=1
-CMD uvicorn src.api:app --host 0.0.0.0 --port 8000 --workers ${WORKERS}
+CMD uvicorn image_service:app --host 0.0.0.0 --port 8000 --workers ${WORKERS}
