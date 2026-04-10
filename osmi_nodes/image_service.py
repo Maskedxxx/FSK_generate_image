@@ -142,14 +142,9 @@ class RoomPolygon(BaseModel):
 # Upscale
 class UpscaleRequest(BaseModel):
     image_base64: str
+    task_id: str = ""  # если задан → сохраняет в S3, возвращает ключ без base64
     zoom_factor: int = UPSCALE_ZOOM_FACTOR
     max_side: int = UPSCALE_MAX_SIDE
-
-
-class UpscaleResponse(BaseModel):
-    image_base64: str
-    original_size: list[int]
-    new_size: list[int]
 
 
 # Crop
@@ -206,9 +201,9 @@ app = FastAPI(title="FSK Image Service")
 # === ЭНДПОИНТЫ ===
 
 
-@app.post("/upscale", response_model=UpscaleResponse)
+@app.post("/upscale")
 def upscale(req: UpscaleRequest):
-    """Апскейл изображения с лимитом по длинной стороне."""
+    """Апскейл изображения с лимитом по длинной стороне. Если task_id задан — сохраняет в S3."""
     img = decode_base64_image(req.image_base64)
     orig_w, orig_h = img.size
 
@@ -225,11 +220,23 @@ def upscale(req: UpscaleRequest):
         new_h = int(new_h * scale)
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
-    return UpscaleResponse(
-        image_base64=encode_image_base64(img),
-        original_size=[orig_w, orig_h],
-        new_size=[new_w, new_h],
-    )
+    # Если task_id задан — сохраняем в S3, возвращаем только ключ
+    if req.task_id:
+        s3_key = f"{S3_PREFIX}/{req.task_id}/L1_crops/schema_x2.png"
+        s3_upload_png(img, s3_key)
+        return {
+            "status": "ok",
+            "s3_key": s3_key,
+            "original_size": [orig_w, orig_h],
+            "new_size": [new_w, new_h],
+        }
+
+    # Без task_id — возвращаем base64 (обратная совместимость)
+    return {
+        "image_base64": encode_image_base64(img),
+        "original_size": [orig_w, orig_h],
+        "new_size": [new_w, new_h],
+    }
 
 
 @app.post("/crop", response_model=CropResponse)
