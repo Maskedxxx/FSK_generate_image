@@ -11,7 +11,9 @@
     POST /draw_polygons  — визуализация полигонов на схеме
     POST /rotate         — апскейл + поворот референса (для Слоя 3)
     POST /stitch         — склейка референсов по полигонам (для Слоя 4)
+    POST /alert          — приём алертов от JS-нод OSMI → Telegram
     GET  /health         — проверка доступности
+    GET  /smoke          — проверка всех компонентов (S3)
 
 Запуск (локально):
     uvicorn osmi_nodes.image_service:app --port 8000
@@ -22,13 +24,19 @@
 
 import base64
 import io
+import logging
 import os
+import traceback
 from typing import Optional
 
 import boto3
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from pydantic import BaseModel
+
+from alerts import send_alert
+
+logger = logging.getLogger(__name__)
 
 
 # === КОНФИГУРАЦИЯ ===
@@ -193,9 +201,36 @@ class StitchRequest(BaseModel):
     rooms: list[StitchRoom]
 
 
+# Alert (от JS-нод OSMI)
+class AlertRequest(BaseModel):
+    layer: int = 0
+    node: str = ""
+    task_id: str = ""
+    error: str = ""
+    step: str = ""
+    context: str = ""
+
+
 # === FASTAPI ===
 
 app = FastAPI(title="FSK Image Service")
+
+
+# Глобальный обработчик ошибок — алертит в Telegram при 500
+@app.middleware("http")
+async def alert_on_error(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        endpoint = request.url.path
+        send_alert(
+            f"Эндпоинт: {endpoint}\n"
+            f"Ошибка: {str(e)[:300]}\n"
+            f"Traceback: {traceback.format_exc()[-200:]}",
+            level="error",
+        )
+        raise
 
 
 # === ЭНДПОИНТЫ ===
@@ -453,3 +488,39 @@ def stitch(req: StitchRequest):
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "FSK Image Service"}
+
+
+@app.post("/alert")
+def alert(req: AlertRequest):
+    """Принимает алерт от JS-нод OSMI → пересылает в Telegram."""
+    parts = []
+    if req.layer:
+        parts.append(f"Слой: {req.layer} / {req.node}")
+    if req.task_id:
+        parts.append(f"Task: {req.task_id}")
+    if req.step:
+        parts.append(f"Шаг: {req.step}")
+    if req.error:
+        parts.append(f"Ошибка: {req.error[:500]}")
+    if req.context:
+        parts.append(f"Контекст: {req.context}")
+
+    message = "\n".join(parts) if parts else "Алерт без деталей"
+    send_alert(message, level="error")
+    return {"status": "ok", "message": "alert sent"}
+
+
+@app.get("/smoke")
+def smoke():
+    """Проверка всех компонентов: S3 доступность."""
+    checks = {}
+
+    # S3: пробуем листнуть бакет
+    try:
+        resp = get_s3_client().list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX + "/", MaxKeys=1)
+        checks["s3"] = {"status": "ok"}
+    except Exception as e:
+        checks["s3"] = {"status": "error", "error": str(e)[:200]}
+
+    all_ok = all(c["status"] == "ok" for c in checks.values())
+    return {"status": "ok" if all_ok else "degraded", "checks": checks}

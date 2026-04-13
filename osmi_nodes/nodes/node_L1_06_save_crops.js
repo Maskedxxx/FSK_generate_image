@@ -1,7 +1,6 @@
 // Слой 1, Нода 6: Сохранение кропов в S3
 // Вход: $crop_result (объект от ноды 5)
 // Output Variable: crops_saved
-// Статус: ПРОТЕСТИРОВАНО ✅
 
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 

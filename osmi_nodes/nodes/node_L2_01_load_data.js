@@ -1,9 +1,6 @@
 // Слой 2 Нода 1: Загрузка данных из S3 по task_id
 // Вход: $input = task_id (строка)
-// Скачивает analysis.json + meta.json из S3
-// Выход: объект {task_id, analysis, answers, rooms_count}
 // Output Variable: l2_data
-// Статус: ПРОТЕСТИРОВАНО ✅
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
@@ -18,6 +15,7 @@ const s3 = new S3Client({
     }
 });
 
+// Скачиваем analysis.json
 const analysisResp = await s3.send(new GetObjectCommand({
     Bucket: 'fsk-service',
     Key: 'fsk-generate-image/' + taskId + '/L1_crops/analysis.json'
@@ -25,6 +23,7 @@ const analysisResp = await s3.send(new GetObjectCommand({
 const analysisBody = await analysisResp.Body.transformToString();
 const analysis = JSON.parse(analysisBody);
 
+// Скачиваем meta.json (опросник)
 const metaResp = await s3.send(new GetObjectCommand({
     Bucket: 'fsk-service',
     Key: 'fsk-generate-image/' + taskId + '/meta.json'

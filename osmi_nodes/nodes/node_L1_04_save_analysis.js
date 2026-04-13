@@ -1,9 +1,8 @@
-// Слой 1, Нода 4: Сохранение analysis.json + L1_meta.json + schema_with_polygons.png
+// Слой 1, Нода 4: Сохранение analysis.json + L1_meta.json + schema_with_polygons
 // Вход: $analyze_result (объект от ноды 3)
-// Статус: ПРОТЕСТИРОВАНО ✅
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const axios = require('axios');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const data = $analyze_result;
 
@@ -16,7 +15,8 @@ const s3 = new S3Client({
     }
 });
 
-// 1. Сохраняем analysis.json
+
+// Сохраняем analysis.json
 const analysisKey = 'fsk-generate-image/' + data.task_id + '/L1_crops/analysis.json';
 await s3.send(new PutObjectCommand({
     Bucket: 'fsk-service',
@@ -25,7 +25,8 @@ await s3.send(new PutObjectCommand({
     ContentType: 'application/json'
 }));
 
-// 2. Сохраняем L1_meta.json (модель, тайминги, размеры, промпт)
+
+// Сохраняем L1_meta.json
 const meta = {
     layer: 1,
     model: data.l1_model || 'google/gemini-3-flash-preview',
@@ -42,7 +43,6 @@ const meta = {
     timing: {
         osmi_call_sec: data.l1_timing_sec || 0
     },
-    prompt: data.l1_prompt || ''
 };
 const metaKey = 'fsk-generate-image/' + data.task_id + '/L1_crops/L1_meta.json';
 await s3.send(new PutObjectCommand({
@@ -52,7 +52,8 @@ await s3.send(new PutObjectCommand({
     ContentType: 'application/json'
 }));
 
-// 3. Сохраняем schema_with_polygons.png через Python API (визуализация полигонов)
+
+// Сохраняем schema_with_polygons.png через Python API
 const rooms = data.analysis.rooms.map(r => ({
     name: r.name || 'unknown',
     polygon: r.polygon || []

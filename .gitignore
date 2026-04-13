@@ -29,6 +29,8 @@ __pycache__/
 *.heif
 *.heic
 *.svg
+# Исключение: фикстуры для тестов
+!osmi_nodes/tests/fixtures/*.jpg
 
 # Секреты
 .env
@@ -40,3 +42,8 @@ pytest-of-mask/
 # Временные файлы
 *.tmp
 *.bak
+
+# Отладочные скрипты
+osmi_nodes/test_layer1.py
+/scripts/
+

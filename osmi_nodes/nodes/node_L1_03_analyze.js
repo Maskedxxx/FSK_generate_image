@@ -4,9 +4,23 @@
 // Статус: ПРОТЕСТИРОВАНО ✅ (5 комнат с полигонами)
 
 const axios = require('axios');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 const startTime = Date.now();
 const data = $s3_result;
+
+// Скачиваем апскейленную схему из S3 (base64 больше не передаётся между нодами)
+const s3 = new S3Client({
+    endpoint: 'https://storage.yandexcloud.net',
+    region: 'us-east-1',
+    credentials: {
+        accessKeyId: '<S3_ACCESS_KEY_ID>',
+        secretAccessKey: '<S3_SECRET_ACCESS_KEY>'
+    }
+});
+const imgResp = await s3.send(new GetObjectCommand({ Bucket: 'fsk-service', Key: data.s3_key }));
+const imgBytes = await imgResp.Body.transformToByteArray();
+const upscaledBase64 = Buffer.from(imgBytes).toString('base64');
 
 const SYSTEM_PROMPT = `You are an expert architect and interior visualization specialist. You work with apartment floor plans daily — you instantly recognize every room type, understand wall structures, doorways, and how rooms connect to each other.
 
@@ -72,7 +86,7 @@ const prompt = SYSTEM_PROMPT + '\n\n' + USER_PROMPT;
 
 const content = [
     { type: "text", text: prompt },
-    { type: "image_url", image_url: { url: "data:image/png;base64," + data.upscaled_base64 } }
+    { type: "image_url", image_url: { url: "data:image/png;base64," + upscaledBase64 } }
 ];
 
 const response = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
@@ -102,7 +116,6 @@ return {
     task_id: data.task_id,
     s3_key: data.s3_key,
     answers: data.answers,
-    upscaled_base64: data.upscaled_base64,
     analysis: analysis,
     rooms_count: analysis.rooms ? analysis.rooms.length : 0,
     l1_timing_sec: (Date.now() - startTime) / 1000,

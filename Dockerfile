@@ -3,11 +3,11 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Зависимости
-COPY requirements.txt .
+COPY osmi_nodes/service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Код
-COPY osmi_nodes/image_service.py .
+# Код сервиса (image_service.py + alerts.py)
+COPY osmi_nodes/service/ .
 
 # Папка результатов
 RUN mkdir -p results logs

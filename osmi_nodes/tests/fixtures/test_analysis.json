@@ -1,0 +1,160 @@
+{
+  "analysis": "The floor plan contains 4 distinct rooms identified by area numbers: a kitchen-living room (13.4), a bedroom (11.9), a bathroom (4.6), a hallway (4.2), and a balcony (3.1). Total 5 polygons are required to cover the entire living space.",
+  "rooms": [
+    {
+      "name": "Кухня-гостиная",
+      "name_source": "label",
+      "area": "13,4",
+      "shape": "rectangular",
+      "analysis": "1) Entrance is from the hallway at the bottom right of the room. 2) Contains a kitchen suite (sink, stove, fridge) on the right, a dining table, a desk at the top left, and a sofa at the bottom. 3) Top: window and desk; Left: wall with balcony door; Bottom: wall shared with bedroom and hallway; Right: kitchen cabinets and external wall. 4) Rectangular polygon covering the main living/cooking zone.",
+      "walls": {
+        "top": "window, desk, wall",
+        "left": "balcony door, wall",
+        "bottom": "sofa, hallway entrance",
+        "right": "kitchen countertop, sink, stove, fridge"
+      },
+      "polygon": [
+        [
+          265,
+          10
+        ],
+        [
+          835,
+          10
+        ],
+        [
+          835,
+          455
+        ],
+        [
+          265,
+          455
+        ]
+      ]
+    },
+    {
+      "name": "Спальня",
+      "name_source": "label",
+      "area": "11,9",
+      "shape": "rectangular",
+      "analysis": "1) Entrance is from the hallway on the right. 2) Contains a large bed, two nightstands, and a wardrobe/storage unit at the top. 3) Top: wall shared with kitchen; Left: external wall with window; Bottom: external wall; Right: wall shared with hallway and bathroom. 4) Rectangular polygon covering the sleeping area.",
+      "walls": {
+        "top": "wardrobe, wall",
+        "left": "window, external wall",
+        "bottom": "external wall",
+        "right": "hallway entrance, bathroom wall"
+      },
+      "polygon": [
+        [
+          65,
+          465
+        ],
+        [
+          485,
+          465
+        ],
+        [
+          485,
+          985
+        ],
+        [
+          65,
+          985
+        ]
+      ]
+    },
+    {
+      "name": "Прихожая",
+      "name_source": "no_label",
+      "area": "4,2",
+      "shape": "rectangular",
+      "analysis": "1) Main apartment entrance is on the right. 2) Central distribution hub connecting all rooms. 3) Top: kitchen entrance; Left: bedroom entrance; Bottom: bathroom entrance; Right: main entrance door and wardrobe. 4) Rectangular polygon covering the transit area.",
+      "walls": {
+        "top": "kitchen opening",
+        "left": "bedroom opening",
+        "bottom": "bathroom door",
+        "right": "entrance door, small closet"
+      },
+      "polygon": [
+        [
+          495,
+          465
+        ],
+        [
+          815,
+          465
+        ],
+        [
+          815,
+          665
+        ],
+        [
+          495,
+          665
+        ]
+      ]
+    },
+    {
+      "name": "Санузел",
+      "name_source": "no_label",
+      "area": "4,6",
+      "shape": "rectangular",
+      "analysis": "1) Entrance is from the hallway at the top. 2) Contains a bathtub, sink, toilet, and washing machine. 3) Top: hallway wall; Left: bedroom wall; Bottom: external wall; Right: external wall. 4) Rectangular polygon covering the wet area.",
+      "walls": {
+        "top": "entrance door, washing machine",
+        "left": "wall shared with bedroom",
+        "bottom": "external wall, sink",
+        "right": "bathtub, external wall"
+      },
+      "polygon": [
+        [
+          495,
+          675
+        ],
+        [
+          815,
+          675
+        ],
+        [
+          815,
+          985
+        ],
+        [
+          495,
+          985
+        ]
+      ]
+    },
+    {
+      "name": "Балкон",
+      "name_source": "no_label",
+      "area": "3,1 (1,5)",
+      "shape": "rectangular",
+      "analysis": "1) Entrance is from the kitchen-living room. 2) Narrow external space. 3) Top: external wall; Left: glazing/railing; Bottom: wall; Right: wall shared with kitchen. 4) Rectangular polygon covering the balcony area.",
+      "walls": {
+        "top": "external wall",
+        "left": "glazing",
+        "bottom": "wall",
+        "right": "door to kitchen"
+      },
+      "polygon": [
+        [
+          15,
+          60
+        ],
+        [
+          255,
+          60
+        ],
+        [
+          255,
+          405
+        ],
+        [
+          15,
+          405
+        ]
+      ]
+    }
+  ]
+}

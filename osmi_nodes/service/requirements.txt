@@ -13,3 +13,6 @@ Pillow==12.1.1
 
 # Yandex Object Storage (S3-совместимый)
 boto3>=1.35.0
+
+# Telegram алерты (sync HTTP клиент)
+httpx>=0.27.0
