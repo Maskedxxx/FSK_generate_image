@@ -8,11 +8,32 @@ python osmi_nodes/tests/test_failures.py
 """
 
 import base64
+import os
 import time
 import sys
+from pathlib import Path
 
 import boto3
 import requests
+
+# ============================================================
+# ЗАГРУЗКА .env
+# ============================================================
+
+def _load_env():
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        print(f"  ❌ .env не найден: {env_path}")
+        sys.exit(1)
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
+
+_load_env()
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -20,12 +41,12 @@ import requests
 
 IMAGE_SERVICE_URL = "https://llm-home.fsk.fvds.ru"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_KEY = "<OPENROUTER_API_KEY>"
+OPENROUTER_KEY = os.environ["OPENROUTER_API_KEY"]
 
 S3_ENDPOINT = "https://storage.yandexcloud.net"
-S3_BUCKET = "fsk-service"
-S3_KEY_ID = "<S3_ACCESS_KEY_ID>"
-S3_SECRET = "<S3_SECRET_ACCESS_KEY>"
+S3_BUCKET = os.environ.get("S3_BUCKET", "fsk-service")
+S3_KEY_ID = os.environ["S3_ACCESS_KEY_ID"]
+S3_SECRET = os.environ["S3_SECRET_ACCESS_KEY"]
 
 # Таймаут для всех тестов — ответ должен прийти быстро
 FAIL_TIMEOUT = 10

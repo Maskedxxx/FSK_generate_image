@@ -30,10 +30,8 @@ ENV_FILE="$PROJECT_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
     TELEGRAM_BOT_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" | cut -d'=' -f2-)
     TELEGRAM_CHAT_ID=$(grep -E '^TELEGRAM_CHAT_ID=' "$ENV_FILE" | cut -d'=' -f2-)
+    OPENROUTER_KEY=$(grep -E '^OPENROUTER_API_KEY=' "$ENV_FILE" | cut -d'=' -f2-)
 fi
-
-# Хардкод OpenRouter ключ для проверки кредитов
-OPENROUTER_KEY="<OPENROUTER_API_KEY>"
 
 if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
     exit 0

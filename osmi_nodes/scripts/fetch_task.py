@@ -13,16 +13,33 @@ import argparse
 import os
 import sys
 import webbrowser
+from pathlib import Path
 
 import boto3
 
-# === КРЕДЫ S3 (захардкожено для самодостаточности) ===
+
+def _load_env():
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        print(f"  ❌ .env не найден: {env_path}")
+        sys.exit(1)
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
+
+_load_env()
+
+# === КРЕДЫ S3 (из .env) ===
 S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 S3_REGION = "us-east-1"
-S3_BUCKET = "fsk-service"
-S3_PREFIX = "fsk-generate-image"
-S3_ACCESS_KEY_ID = "<S3_ACCESS_KEY_ID>"
-S3_SECRET_ACCESS_KEY = "<S3_SECRET_ACCESS_KEY>"
+S3_BUCKET = os.environ.get("S3_BUCKET", "fsk-service")
+S3_PREFIX = os.environ.get("S3_PREFIX", "fsk-generate-image")
+S3_ACCESS_KEY_ID = os.environ["S3_ACCESS_KEY_ID"]
+S3_SECRET_ACCESS_KEY = os.environ["S3_SECRET_ACCESS_KEY"]
 
 # Время жизни presigned URL — 1 час
 URL_EXPIRES = 3600
